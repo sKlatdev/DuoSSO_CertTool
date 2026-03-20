@@ -52,7 +52,8 @@ function Test-PreflightRequirements {
 # ----------------------------------------------------------------
 $ScriptDir  = Split-Path -Path $PSCommandPath -Parent
 $WorkingDir = (Get-Location).Path
-$BackupDir  = Join-Path $WorkingDir "Backup"
+$CertFolder = Join-Path $WorkingDir "Certificates"
+$BackupDir  = Join-Path $CertFolder "Backups"
 $LogFile    = Join-Path $WorkingDir "DuoSSO-CertTool.log"
 $RestoreLog = Join-Path $BackupDir "RESTORE-INSTRUCTIONS.log"
 
@@ -80,8 +81,8 @@ function Write-Restore {
 # ----------------------------------------------------------------
 # GLOBAL VARIABLES
 # ----------------------------------------------------------------
-$CertFolder   = Join-Path $WorkingDir "Certificates"
-$ReportsDir   = Join-Path $WorkingDir "Reports"
+if (!(Test-Path $CertFolder)) { New-Item -Path $CertFolder -ItemType Directory -Force | Out-Null }
+if (!(Test-Path $BackupDir)) { New-Item -Path $BackupDir -ItemType Directory -Force | Out-Null }
 
 # PFX password: generated at runtime, NEVER logged or displayed unless explicitly needed for operator handoff
 # For cross-DC scenarios, password is shown ONLY in final summary section and user must acknowledge
@@ -1769,10 +1770,10 @@ function Restart-NTDSAndVerify {
 }
 
 # ================================================================
-# REPORTING: JSON + HTML from RunContext
+# REPORTING: HTML from RunContext
 # ================================================================
 
-function Generate-JsonReport {
+function New-ReportData {
     param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb)
     
     $report = @{
@@ -1819,24 +1820,23 @@ function Generate-JsonReport {
         $report.Metadata | Add-Member -NotePropertyName "Important" -NotePropertyValue "REPORT-ONLY: No changes were made to the system."
     }
     
-    return $report | ConvertTo-Json -Depth 10
+    return [PSCustomObject]$report
 }
 
 function Generate-HtmlReport {
-    param([string]$JsonData)
+    param($ReportData)
     
-    $json = $JsonData | ConvertFrom-Json
-    $modeClass = if ($json.Metadata.ExecutionMode -eq "Execution") { "exec" } else { "report" }
-    $modeBadge = if ($json.Metadata.ExecutionMode -eq "Execution") { "✓ EXECUTION MODE" } else { "⚠ REPORT-ONLY MODE" }
+    $modeClass = if ($ReportData.Metadata.ExecutionMode -eq "Execution") { "exec" } else { "report" }
+    $modeBadge = if ($ReportData.Metadata.ExecutionMode -eq "Execution") { "✓ EXECUTION MODE" } else { "⚠ REPORT-ONLY MODE" }
     $importantHtml = ""
     $plannedActionsHtml = ""
 
-    if ($json.Metadata.PSObject.Properties.Name -contains "Important" -and $json.Metadata.Important) {
-        $importantHtml = "<div class='no-changes'>$($json.Metadata.Important)</div>"
+    if ($ReportData.Metadata.PSObject.Properties.Name -contains "Important" -and $ReportData.Metadata.Important) {
+        $importantHtml = "<div class='no-changes'>$($ReportData.Metadata.Important)</div>"
     }
 
-    if ($json.Summary.PlannedActions -gt 0) {
-        $plannedRows = $json.PlannedActions | ForEach-Object {
+    if ($ReportData.Summary.PlannedActions -gt 0) {
+        $plannedRows = $ReportData.PlannedActions | ForEach-Object {
             "<tr class='planned'><td>$($_.Type)</td><td>$($_.Details | ConvertTo-Json -Compress)</td></tr>"
         }
         $plannedActionsHtml = "<div class='section'><h2>Planned Actions</h2><table><tr><th>Type</th><th>Details</th></tr>$($plannedRows -join '')</table></div>"
@@ -1874,21 +1874,21 @@ tr:hover{background:#f9f9f9}
 <div class="header"><h1>DuoSSO Certificate Tool Report</h1><div class="mode-badge $modeClass">$modeBadge</div></div>
 <div class="section"><h2>Execution Summary</h2>
 <div class="summary-grid">
-<div class="summary-item"><label>Mode:</label><value>$($json.Metadata.ExecutionMode)</value></div>
-<div class="summary-item"><label>Operation:</label><value>$($json.Metadata.OperationMode)</value></div>
-<div class="summary-item"><label>Hostname:</label><value>$($json.Metadata.Hostname)</value></div>
-<div class="summary-item"><label>Timestamp:</label><value>$($json.Metadata.Timestamp)</value></div>
+<div class="summary-item"><label>Mode:</label><value>$($ReportData.Metadata.ExecutionMode)</value></div>
+<div class="summary-item"><label>Operation:</label><value>$($ReportData.Metadata.OperationMode)</value></div>
+<div class="summary-item"><label>Hostname:</label><value>$($ReportData.Metadata.Hostname)</value></div>
+<div class="summary-item"><label>Timestamp:</label><value>$($ReportData.Metadata.Timestamp)</value></div>
 </div></div>
 $importantHtml
 <div class="section"><h2>Actions Summary</h2>
 <div class="summary-grid">
-<div class="summary-item"><label>Planned:</label><value>$($json.Summary.PlannedActions)</value></div>
-<div class="summary-item"><label>Executed:</label><value>$($json.Summary.ExecutedActions)</value></div>
-<div class="summary-item"><label>Warnings:</label><value class="warning">$($json.Summary.Warnings)</value></div>
-<div class="summary-item"><label>Errors:</label><value class="error">$($json.Summary.Errors)</value></div>
+<div class="summary-item"><label>Planned:</label><value>$($ReportData.Summary.PlannedActions)</value></div>
+<div class="summary-item"><label>Executed:</label><value>$($ReportData.Summary.ExecutedActions)</value></div>
+<div class="summary-item"><label>Warnings:</label><value class="warning">$($ReportData.Summary.Warnings)</value></div>
+<div class="summary-item"><label>Errors:</label><value class="error">$($ReportData.Summary.Errors)</value></div>
 </div></div>
 $plannedActionsHtml
-<div class="footer"><p>Report ID: $($json.Metadata.SessionId)</p></div>
+<div class="footer"><p>Report ID: $($ReportData.Metadata.SessionId)</p></div>
 </div></body></html>
 "@
     return $html
@@ -1900,17 +1900,11 @@ function Write-Reports {
     if (!$RunContext) { return }
     
     $timestamp = $RunContext.SessionId
-    $jsonFile = Join-Path $WorkingDir "DuoSSO-CertTool-Report-$timestamp.json"
     $htmlFile = Join-Path $WorkingDir "DuoSSO-CertTool-Report-$timestamp.html"
     
     try {
-        # Generate and write JSON report
-        $jsonData = Generate-JsonReport -Mode $Mode -FQDN $FQDN -RootThumb $RootThumb -LeafThumb $LeafThumb
-        [System.IO.File]::WriteAllText($jsonFile, $jsonData)
-        Write-Log "  - Report: $jsonFile"
-        
-        # Generate and write HTML report
-        $htmlData = Generate-HtmlReport -JsonData $jsonData
+        $reportData = New-ReportData -Mode $Mode -FQDN $FQDN -RootThumb $RootThumb -LeafThumb $LeafThumb
+        $htmlData = Generate-HtmlReport -ReportData $reportData
         [System.IO.File]::WriteAllText($htmlFile, $htmlData)
         Write-Log "  - Report: $htmlFile"
     } catch {
@@ -2409,7 +2403,8 @@ switch (Read-Host "Enter selection (1-4)") {
     "3" {
         Write-Host ""
         Write-Host "  Path to shared Root CA PFX from the Primary DC."
-        Write-Host "  Example: \\DC1\C$\Admin\Certificates\DuoSSO-RootCert.pfx"
+        Write-Host "  Usually: Certificates\DuoSSO-RootCert-Shared.pfx in the script working directory."
+        Write-Host "  Example: C:\Admin\Certificates\DuoSSO-RootCert-Shared.pfx"
         Write-Host ""
         $pfx = Read-Host "  Shared Root CA PFX path"
         if (!$pfx) { Write-Log "ERROR: No PFX path provided." "ERROR"; exit 1 }

@@ -21,7 +21,7 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - Rebuilds and exports full certificate chain artifacts when issuing a new chain.
 - Backs up certificates before deletion and records restore instructions.
 - Injects certificates into the NTDS certificate store and verifies LDAPS presentation.
-- Generates machine-readable and human-readable reports for every run.
+- Generates an HTML report for every run.
 
 ## Supported Operating Modes
 
@@ -47,7 +47,7 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - Prompts remain interactive and use the same decision tree as `Execution` mode.
 - Interactive prompts are labeled with `[REPORT-ONLY]`.
 - State-changing operations are logged as planned actions and skipped.
-- Reports are still written so the run can be reviewed and shared.
+- The HTML report is still written so the run can be reviewed and shared.
 - The main log file is also written in `Report-Only` mode.
 - Output paths are based on the current working directory where the script is launched.
 
@@ -74,10 +74,9 @@ The script writes or plans the following under its working directory:
   - exported root CER / PEM / PFX
   - exported LDAPS CER / PFX
   - existing-chain exports when that path is selected
-- `Backup\`
+- `Certificates\Backups\`
   - per-run backup folders
   - `RESTORE-INSTRUCTIONS.log` in `Execution` mode
-- `DuoSSO-CertTool-Report-<session>.json`
 - `DuoSSO-CertTool-Report-<session>.html`
 - `DuoSSO-CertTool.log`
   - written in both `Execution` and `Report-Only` modes
@@ -122,7 +121,7 @@ Non-interactive secondary mode is used by Agent deployments:
   If a usable existing chain is found, the operator can instead package the existing chain or create a new packaged chain without removing the current certificates.
 6. Bind the selected leaf certificate to NTDS.
 7. Restart and verify LDAPS in `Execution` mode, or log the planned steps in `Report-Only` mode.
-8. Generate JSON and HTML reports.
+8. Generate the HTML report.
 
 ## Safety Notes
 

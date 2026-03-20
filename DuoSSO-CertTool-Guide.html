@@ -55,7 +55,7 @@ ul, ol {
 
 <div class="ok">
 <strong>Current release highlights</strong><br>
-Report-Only mode follows the same interactive decision tree as Execution mode, labels prompts clearly, skips state-changing operations, and still emits JSON and HTML reports for review. When a usable existing chain is found, the tool now offers a packaging-first path instead of forcing replacement.
+Report-Only mode follows the same interactive decision tree as Execution mode, labels prompts clearly, skips state-changing operations, and still emits the HTML report and log for review. When a usable existing chain is found, the tool now offers a packaging-first path instead of forcing replacement.
 </div>
 
 <h2>1. Prerequisites</h2>
@@ -110,7 +110,7 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <li>Prompts are still interactive and prefixed with <code>[REPORT-ONLY]</code>.</li>
 <li>Certificate creation, import, export, deletion, registry writes, service changes, and remote operations are logged as planned actions only.</li>
 <li>The main execution log is still written so the dry run has a durable console transcript.</li>
-<li>JSON and HTML reports are still written so the dry run can be reviewed.</li>
+<li>The HTML report is still written so the dry run can be reviewed.</li>
 <li>Artifacts are written under the current working directory where the script is launched.</li>
 </ul>
 
@@ -144,9 +144,8 @@ The intended filesystem output in Report-Only mode is the generated report files
 <h2>7. Generated Files</h2>
 <ul>
 <li><code>Certificates\</code>: exported root and leaf certificate artifacts.</li>
-<li><code>Backup\</code>: backup folders for certificate recovery.</li>
-<li><code>Backup\RESTORE-INSTRUCTIONS.log</code>: execution-mode restore script guidance.</li>
-<li><code>DuoSSO-CertTool-Report-&lt;session&gt;.json</code>: structured run ledger in the working directory.</li>
+<li><code>Certificates\Backups\</code>: backup folders for certificate recovery.</li>
+<li><code>Certificates\Backups\RESTORE-INSTRUCTIONS.log</code>: execution-mode restore script guidance.</li>
 <li><code>DuoSSO-CertTool-Report-&lt;session&gt;.html</code>: human-readable run summary in the working directory.</li>
 <li><code>DuoSSO-CertTool.log</code>: console log written in both execution modes.</li>
 </ul>
@@ -171,7 +170,7 @@ The intended filesystem output in Report-Only mode is the generated report files
 <h2>10. Recommended Validation Sequence</h2>
 <ol>
 <li>Run <code>Report-Only</code> first in the intended mode.</li>
-<li>Review the generated JSON and HTML reports.</li>
+<li>Review the generated HTML report and log.</li>
 <li>Confirm the selected chain or issuance path is correct.</li>
 <li>Run <code>Execution</code> only after the dry run is acceptable.</li>
 <li>Retain the report set and backup output with the change record.</li>
