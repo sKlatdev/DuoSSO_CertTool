@@ -393,7 +393,7 @@ function Invoke-CertificateExport {
                 "PFX" { Export-PfxCertificate -Cert $Certificate -FilePath $FilePath -Password $Password -Force | Out-Null }
             }
             Log-ExecutedAction -ActionType "CertExport" -Details $details
-            Write-Log "  - Exported $Format: $FilePath"
+                Write-Log "  - Exported ${Format}: $FilePath"
             return $true
         } catch {
             Write-Log "WARNING: CertExport failed: $($_.Exception.Message)" "WARN"
@@ -1728,6 +1728,19 @@ function Generate-HtmlReport {
     $json = $JsonData | ConvertFrom-Json
     $modeClass = if ($json.Metadata.ExecutionMode -eq "Execution") { "exec" } else { "report" }
     $modeBadge = if ($json.Metadata.ExecutionMode -eq "Execution") { "✓ EXECUTION MODE" } else { "⚠ REPORT-ONLY MODE" }
+    $importantHtml = ""
+    $plannedActionsHtml = ""
+
+    if ($json.Metadata.PSObject.Properties.Name -contains "Important" -and $json.Metadata.Important) {
+        $importantHtml = "<div class='no-changes'>$($json.Metadata.Important)</div>"
+    }
+
+    if ($json.Summary.PlannedActions -gt 0) {
+        $plannedRows = $json.PlannedActions | ForEach-Object {
+            "<tr class='planned'><td>$($_.Type)</td><td>$($_.Details | ConvertTo-Json -Compress)</td></tr>"
+        }
+        $plannedActionsHtml = "<div class='section'><h2>Planned Actions</h2><table><tr><th>Type</th><th>Details</th></tr>$($plannedRows -join '')</table></div>"
+    }
     
     $html = @"
 <!DOCTYPE html>
@@ -1766,7 +1779,7 @@ tr:hover{background:#f9f9f9}
 <div class="summary-item"><label>Hostname:</label><value>$($json.Metadata.Hostname)</value></div>
 <div class="summary-item"><label>Timestamp:</label><value>$($json.Metadata.Timestamp)</value></div>
 </div></div>
-$($json.Metadata.Important ? "<div class='no-changes'>$($json.Metadata.Important)</div>" : "")
+$importantHtml
 <div class="section"><h2>Actions Summary</h2>
 <div class="summary-grid">
 <div class="summary-item"><label>Planned:</label><value>$($json.Summary.PlannedActions)</value></div>
@@ -1774,7 +1787,7 @@ $($json.Metadata.Important ? "<div class='no-changes'>$($json.Metadata.Important
 <div class="summary-item"><label>Warnings:</label><value class="warning">$($json.Summary.Warnings)</value></div>
 <div class="summary-item"><label>Errors:</label><value class="error">$($json.Summary.Errors)</value></div>
 </div></div>
-$($json.Summary.PlannedActions -gt 0 ? "<div class='section'><h2>Planned Actions</h2><table><tr><th>Type</th><th>Details</th></tr>$($json.PlannedActions | ForEach-Object { "<tr class='planned'><td>$($_.Type)</td><td>$($_.Details | ConvertTo-Json -Compress)</td></tr>" })</table></div>" : "")
+$plannedActionsHtml
 <div class="footer"><p>Report ID: $($json.Metadata.SessionId)</p></div>
 </div></body></html>
 "@
