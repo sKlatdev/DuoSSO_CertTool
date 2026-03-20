@@ -323,7 +323,7 @@ function Invoke-CertificateCreate {
     
     if ($RunContext.RunMode -eq "ReportOnly") {
         Write-Log "  [DRY-RUN] Would create certificate: $Subject" "INFO"
-        $dummyCert = @{ Thumbprint = "[REPORT-ONLY]"; Subject = $Subject }
+        $dummyCert = @{ Thumbprint = "REPORTONLY-DUMMY"; Subject = $Subject }
         return $dummyCert
     }
     
@@ -345,7 +345,7 @@ function Invoke-CertificateImport {
     
     if ($RunContext.RunMode -eq "ReportOnly") {
         Write-Log "  [DRY-RUN] Would import certificate: $FilePath → $Store" "INFO"
-        $dummyCert = @{ Thumbprint = "[REPORT-ONLY]"; FilePath = $FilePath }
+        $dummyCert = @{ Thumbprint = "REPORTONLY-IMPORTED"; FilePath = $FilePath }
         return $dummyCert
     }
     
@@ -1416,7 +1416,7 @@ function New-RootCA {
         
         if ($RunContext.RunMode -eq "ReportOnly") {
             Write-Log "  [DRY-RUN] Would create Root CA certificate" "INFO"
-            $root = @{ Thumbprint = "[REPORT-ONLY-ROOT]"; Subject = "CN=DuoSSO-RootCA"; NotAfter = (Get-Date).AddYears(10) }
+            $root = @{ Thumbprint = "REPORTONLY-ROOT"; Subject = "CN=DuoSSO-RootCA"; NotAfter = (Get-Date).AddYears(10) }
         } else {
             $root = New-SelfSignedCertificate `
               -Type Custom `
@@ -1462,9 +1462,9 @@ function Import-SharedRootCA {
 
     try {
         $imported = Invoke-CertificateImport -FilePath $SharedRootPfxPath -Store "Cert:\LocalMachine\My" -Password $PfxPassword -Description "Import shared Root PFX into My"
-        if ($RunContext.RunMode -eq "ReportOnly" -and $imported.Thumbprint -eq "[REPORT-ONLY]") {
+        if ($RunContext.RunMode -eq "ReportOnly" -and $imported.Thumbprint -eq "REPORTONLY-IMPORTED") {
             Write-Log "  [DRY-RUN] Shared Root CA import simulated." "INFO"
-            return @{ Thumbprint = "[REPORT-ONLY-ROOT]"; Subject = "CN=DuoSSO-RootCA" }
+            return @{ Thumbprint = "REPORTONLY-ROOT"; Subject = "CN=DuoSSO-RootCA" }
         }
 
         if (!$imported) { Write-Log "ERROR: Shared Root CA import failed." "ERROR"; exit 1 }
@@ -1515,7 +1515,7 @@ function New-LdapsCert {
         
         if ($RunContext.RunMode -eq "ReportOnly") {
             Write-Log "  [DRY-RUN] Would create LDAPS leaf certificate: CN=$FQDN" "INFO"
-            $leaf = @{ Thumbprint = "[REPORT-ONLY-LEAF]"; Subject = "CN=$FQDN"; NotAfter = (Get-Date).AddYears(5) }
+            $leaf = @{ Thumbprint = "REPORTONLY-LEAF"; Subject = "CN=$FQDN"; NotAfter = (Get-Date).AddYears(5) }
         } else {
             $leaf = New-SelfSignedCertificate `
               -Type Custom `
@@ -1555,7 +1555,7 @@ function Validate-LdapsCert {
         return
     }
 
-    if ($Cert.Thumbprint -eq "[REPORT-ONLY-LEAF]") {
+    if ($Cert.Thumbprint -eq "REPORTONLY-LEAF") {
         Write-Log "  [DRY-RUN] Validation skipped for report-only placeholder certificate" "INFO"
         return
     }
@@ -1585,7 +1585,7 @@ function Inject-IntoNTDS {
     }
 
     # Grant NETWORK SERVICE + SYSTEM read on private key
-    if ($Cert.Thumbprint -ne "[REPORT-ONLY-LEAF]") {
+    if ($Cert.Thumbprint -ne "REPORTONLY-LEAF") {
         try {
             $keyName = $null
             try   { $keyName = $Cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName } catch {}
