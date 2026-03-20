@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DuoSSO Cert Tool Guide</title>
+<style>
+body {
+    font-family: Segoe UI, Arial, sans-serif;
+    margin: 36px;
+    color: #1f2937;
+    line-height: 1.5;
+}
+h1, h2, h3 {
+    color: #0f3d63;
+}
+h1 {
+    border-bottom: 3px solid #0f6cbd;
+    padding-bottom: 8px;
+}
+h2 {
+    margin-top: 28px;
+    border-left: 4px solid #0f6cbd;
+    padding-left: 10px;
+}
+code {
+    font-family: Consolas, monospace;
+    background: #f3f4f6;
+    padding: 1px 4px;
+}
+pre {
+    background: #f3f4f6;
+    padding: 12px;
+    border: 1px solid #d1d5db;
+    overflow-x: auto;
+}
+.note {
+    border-left: 4px solid #f59e0b;
+    background: #fff7ed;
+    padding: 10px 12px;
+}
+.ok {
+    border-left: 4px solid #16a34a;
+    background: #f0fdf4;
+    padding: 10px 12px;
+}
+ul, ol {
+    margin-top: 8px;
+}
+</style>
+</head>
+<body>
+<h1>DuoSSO Cert Tool Operator Guide</h1>
+
+<p>This guide covers the current feature set of the DuoSSO LDAPS certificate deployment tool, including Execution mode, Report-Only mode, reporting outputs, backup behavior, and multi-DC deployment flows.</p>
+
+<div class="ok">
+<strong>Current release highlights</strong><br>
+Report-Only mode follows the same interactive decision tree as Execution mode, labels prompts clearly, skips state-changing operations, and still emits JSON and HTML reports for review.
+</div>
+
+<h2>1. Prerequisites</h2>
+<ul>
+<li>Run on a Windows domain controller for full deployment behavior.</li>
+<li>Launch PowerShell as Administrator.</li>
+<li>Ensure <code>certutil.exe</code> is available.</li>
+<li>Ensure Active Directory resolution works locally.</li>
+<li>Enable WinRM on target DCs when using Agent mode.</li>
+</ul>
+
+<h2>2. Startup Flow</h2>
+<ol>
+<li>Preflight validation checks elevation, DC suitability, and required tooling.</li>
+<li>The script prompts for <code>Execution</code> or <code>Report-Only</code>.</li>
+<li>The script prompts for one of the four operating modes.</li>
+<li>The tool scans existing LDAPS-capable chains before creating anything new.</li>
+</ol>
+
+<h2>3. Operating Modes</h2>
+
+<h3>Single DC</h3>
+<ul>
+<li>Deploys or replaces the LDAPS chain on the local domain controller.</li>
+<li>Use the generated root PEM for Duo upload after the run.</li>
+</ul>
+
+<h3>Multi-DC Primary</h3>
+<ul>
+<li>Creates the shared root CA.</li>
+<li>Issues the local DC leaf certificate.</li>
+<li>Exports the shared root PFX for secondary domain controllers.</li>
+<li>Upload the PEM to Duo once for the environment.</li>
+</ul>
+
+<h3>Multi-DC Secondary</h3>
+<ul>
+<li>Imports the shared root PFX.</li>
+<li>Issues only the local DC leaf certificate.</li>
+<li>Does not require a second PEM upload to Duo.</li>
+</ul>
+
+<h3>Multi-DC Agent</h3>
+<ul>
+<li>Runs the primary flow on the current DC.</li>
+<li>Discovers other domain controllers.</li>
+<li>Copies the tool and shared PFX remotely and invokes Secondary mode over WinRM.</li>
+</ul>
+
+<h2>4. Report-Only Mode</h2>
+<ul>
+<li>Prompts are still interactive and prefixed with <code>[REPORT-ONLY]</code>.</li>
+<li>Certificate creation, import, export, deletion, registry writes, service changes, and remote operations are logged as planned actions only.</li>
+<li>Execution-specific logs and restore instruction files are not written in Report-Only mode.</li>
+<li>JSON and HTML reports are still written so the dry run can be reviewed.</li>
+</ul>
+
+<div class="note">
+<strong>Expected Report-Only artifacts</strong><br>
+The intended filesystem output in Report-Only mode is the generated report set in <code>Reports\</code>.
+</div>
+
+<h2>5. Existing Chain Path</h2>
+<ul>
+<li>The tool scans LocalMachine\My for non-self-signed candidate leaf certificates.</li>
+<li>Each discovered chain is evaluated for Duo compliance.</li>
+<li>Chains are categorized as compliant, partial, or non-compliant.</li>
+<li>The operator can choose an acceptable existing chain or continue to new issuance.</li>
+</ul>
+
+<h2>6. New Issuance Path</h2>
+<ol>
+<li>Back up current certificates and NTDS binding data.</li>
+<li>Warn the operator about non-restorable private key material when relevant.</li>
+<li>Wipe the target certificate set.</li>
+<li>Create or import the root CA as required.</li>
+<li>Trust the root CA locally.</li>
+<li>Issue the new LDAPS leaf certificate.</li>
+<li>Validate SAN, EKU, and store presence.</li>
+<li>Bind the leaf certificate into NTDS.</li>
+<li>Restart services and verify LDAPS in Execution mode.</li>
+</ol>
+
+<h2>7. Generated Files</h2>
+<ul>
+<li><code>Certificates\</code>: exported root and leaf certificate artifacts.</li>
+<li><code>Backup\</code>: backup folders for certificate recovery.</li>
+<li><code>Backup\RESTORE-INSTRUCTIONS.log</code>: execution-mode restore script guidance.</li>
+<li><code>Reports\Report-&lt;session&gt;.json</code>: structured run ledger.</li>
+<li><code>Reports\Report-&lt;session&gt;.html</code>: human-readable run summary.</li>
+<li><code>DuoSSO-CertTool.log</code>: execution-mode console log.</li>
+</ul>
+
+<h2>8. Report Contents</h2>
+<ul>
+<li>Execution mode and operation mode metadata</li>
+<li>Target FQDN and thumbprint summary</li>
+<li>Planned action ledger</li>
+<li>Executed action ledger</li>
+<li>Warnings, errors, and findings</li>
+<li>Restore instruction lines captured from the run context</li>
+</ul>
+
+<h2>9. Running The Tool</h2>
+<pre><code>.\DuoSSO-CertTool.ps1</code></pre>
+
+<p>Agent mode uses a non-interactive Secondary invocation on remote DCs:</p>
+
+<pre><code>.\DuoSSO-CertTool.ps1 3 "C:\Path\To\DuoSSO-RootCert-Shared.pfx"</code></pre>
+
+<h2>10. Recommended Validation Sequence</h2>
+<ol>
+<li>Run <code>Report-Only</code> first in the intended mode.</li>
+<li>Review the generated JSON and HTML reports.</li>
+<li>Confirm the selected chain or issuance path is correct.</li>
+<li>Run <code>Execution</code> only after the dry run is acceptable.</li>
+<li>Retain the report set and backup output with the change record.</li>
+</ol>
+
+<h2>11. Operational Notes</h2>
+<ul>
+<li>Use a lab domain before production rollout.</li>
+<li>Validate WinRM reachability before using Agent mode broadly.</li>
+<li>Keep the shared root PFX secure when distributing to secondary DCs.</li>
+<li>Upload the correct PEM to Duo after Single DC or Primary execution.</li>
+</ul>
+
+</body>
+</html>
