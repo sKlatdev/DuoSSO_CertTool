@@ -61,12 +61,22 @@ function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
     Write-Host $Message
-    Add-Content -Path $LogFile -Value $line
+
+    if (!$RunContext -or $RunContext.RunMode -eq "Execution") {
+        Add-Content -Path $LogFile -Value $line
+    }
 }
 
 function Write-Restore {
     param([string]$Message)
-    Add-Content -Path $RestoreLog -Value $Message
+
+    if ($RunContext) {
+        $RunContext.RestoreInstructions.Add($Message)
+    }
+
+    if (!$RunContext -or $RunContext.RunMode -eq "Execution") {
+        Add-Content -Path $RestoreLog -Value $Message
+    }
 }
 
 # ----------------------------------------------------------------
@@ -108,6 +118,7 @@ function Initialize-RunContext {
         PlannedActions       = [System.Collections.Generic.List[hashtable]]::new()
         ExecutedActions      = [System.Collections.Generic.List[hashtable]]::new()
         SkippedActions       = [System.Collections.Generic.List[hashtable]]::new()
+        RestoreInstructions  = [System.Collections.Generic.List[string]]::new()
         Findings             = [System.Collections.Generic.List[string]]::new()
         Warnings             = [System.Collections.Generic.List[string]]::new()
         Errors               = [System.Collections.Generic.List[string]]::new()
@@ -1680,6 +1691,7 @@ function Generate-JsonReport {
             LeafThumbprint   = $LeafThumb
             PlannedActions   = $RunContext.PlannedActions.Count
             ExecutedActions  = $RunContext.ExecutedActions.Count
+            RestoreLines     = $RunContext.RestoreInstructions.Count
             Warnings         = $RunContext.Warnings.Count
             Errors           = $RunContext.Errors.Count
         }
@@ -1697,6 +1709,7 @@ function Generate-JsonReport {
                 Details   = $_.Details
             }
         })
+        RestoreInstructions = @($RunContext.RestoreInstructions)
         Warnings = $RunContext.Warnings
         Errors   = $RunContext.Errors
         Findings = $RunContext.Findings
@@ -1772,6 +1785,10 @@ function Write-Reports {
     param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb)
     
     if (!$RunContext) { return }
+
+    if (!(Test-Path $ReportsDir)) {
+        [System.IO.Directory]::CreateDirectory($ReportsDir) | Out-Null
+    }
     
     $timestamp = $RunContext.SessionId
     $jsonFile = Join-Path $ReportsDir "Report-$timestamp.json"
