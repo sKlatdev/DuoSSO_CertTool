@@ -78,6 +78,24 @@ function Write-Restore {
     }
 }
 
+function Get-ScriptBuildId {
+    if ($script:ScriptBuildId) { return $script:ScriptBuildId }
+
+    try {
+        $hash = Get-FileHash -Path $PSCommandPath -Algorithm SHA256 -ErrorAction Stop
+        $script:ScriptBuildId = $hash.Hash.Substring(0, 12)
+    } catch {
+        $script:ScriptBuildId = "UNKNOWN"
+    }
+
+    return $script:ScriptBuildId
+}
+
+function Write-ScriptIdentity {
+    Write-Log "    Script Path: $PSCommandPath"
+    Write-Log "    Script Build: $(Get-ScriptBuildId)"
+}
+
 # ----------------------------------------------------------------
 # GLOBAL VARIABLES
 # ----------------------------------------------------------------
@@ -1941,7 +1959,7 @@ function Print-Summary {
             Write-Log ""
             Write-Log "  *** Distribute Root PFX to all secondary DCs ***"
             Write-Log "      $sharedRootPfx"
-            Write-Log "      Password: $script:PlainPfxPass"
+            Write-Host "      Password: $script:PlainPfxPass"
             Write-Log ""
             Write-Log "  Secondary mode path to use:"
             Write-Log "      $sharedRootPfx"
@@ -1981,7 +1999,7 @@ function Print-PackageSummary {
         Write-Log ""
         Write-Log "  Shared Root PFX:"
         Write-Log "      $sharedRootPfx"
-        Write-Log "      Password: $script:PlainPfxPass"
+        Write-Host "      Password: $script:PlainPfxPass"
         Write-Log ""
         Write-Log "  Secondary mode path to use:"
         Write-Log "      $sharedRootPfx"
@@ -2058,6 +2076,7 @@ function Deploy-ToDC {
 
 function Run-SingleDC {
     Write-Log "=== MODE: Single DC  [$(Get-Date)] ==="
+    Write-ScriptIdentity
     Ensure-Folders
     $dc = Resolve-DCNames
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
@@ -2127,6 +2146,7 @@ function Run-SingleDC {
 
 function Run-MultiDCPrimary {
     Write-Log "=== MODE: Multi-DC Primary  [$(Get-Date)] ==="
+    Write-ScriptIdentity
     Ensure-Folders
     $dc = Resolve-DCNames
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
@@ -2198,8 +2218,10 @@ function Run-MultiDCSecondary {
     param([string]$SharedRootPfxPath, [string]$SharedRootPfxPassword = "")
 
     Write-Log "=== MODE: Multi-DC Secondary  [$(Get-Date)] ==="
+    Write-ScriptIdentity
     Write-Log "    Shared Root PFX: $SharedRootPfxPath"
     if ($SharedRootPfxPassword) { Set-PfxPassword -PlainTextPassword $SharedRootPfxPassword }
+    if ([string]::IsNullOrWhiteSpace($SharedRootPfxPath)) { Write-Log "ERROR: No shared Root PFX path provided." "ERROR"; exit 1 }
     Ensure-Folders
     $dc = Resolve-DCNames
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
@@ -2270,6 +2292,7 @@ function Run-MultiDCSecondary {
 
 function Run-MultiDCAgent {
     Write-Log "=== MODE: Multi-DC Agent  [$(Get-Date)] ==="
+    Write-ScriptIdentity
     Ensure-Folders
 
     # Step 1: Run Primary on this DC to generate the shared Root CA
@@ -2326,7 +2349,8 @@ function Run-MultiDCAgent {
     if ($failed.Count -gt 0) {
         Write-Log ""
         Write-Log "  For failed DCs, distribute the Root PFX manually and run mode [3]:"
-        Write-Log "    Root PFX: $sharedRootPfx  (password: $script:PlainPfxPass)"
+        Write-Log "    Root PFX: $sharedRootPfx"
+        Write-Host "    Password: $script:PlainPfxPass"
         $failed | ForEach-Object { Write-Log "    - $($_.DC)" }
     }
 

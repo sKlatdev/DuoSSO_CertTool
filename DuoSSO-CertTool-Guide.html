@@ -88,7 +88,8 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <li>Creates the shared root CA.</li>
 <li>Issues the local DC leaf certificate.</li>
 <li>Exports the shared root PFX for secondary domain controllers at <code>Certificates\DuoSSO-RootCert-Shared.pfx</code>.</li>
-<li>Displays the shared root PFX password in the completion summary.</li>
+<li>Displays the shared root PFX password in the console completion summary.</li>
+<li>Does not write the shared root PFX password to <code>DuoSSO-CertTool.log</code>.</li>
 <li>Upload the PEM to Duo once for the environment.</li>
 </ul>
 
