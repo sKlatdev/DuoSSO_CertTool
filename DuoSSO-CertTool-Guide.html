@@ -55,7 +55,7 @@ ul, ol {
 
 <div class="ok">
 <strong>Current release highlights</strong><br>
-Report-Only mode follows the same interactive decision tree as Execution mode, labels prompts clearly, skips state-changing operations, and still emits JSON and HTML reports for review.
+Report-Only mode follows the same interactive decision tree as Execution mode, labels prompts clearly, skips state-changing operations, and still emits JSON and HTML reports for review. When a usable existing chain is found, the tool now offers a packaging-first path instead of forcing replacement.
 </div>
 
 <h2>1. Prerequisites</h2>
@@ -124,7 +124,8 @@ The intended filesystem output in Report-Only mode is the generated report set i
 <li>The tool scans LocalMachine\My for non-self-signed candidate leaf certificates.</li>
 <li>Each discovered chain is evaluated for Duo compliance.</li>
 <li>Chains are categorized as compliant, partial, or non-compliant.</li>
-<li>The operator can choose an acceptable existing chain or continue to new issuance.</li>
+<li>The operator can choose an acceptable existing chain and package it for Duo without replacing the live certificates.</li>
+<li>If the operator chooses a new chain while a usable existing chain is present, the old certificates are preserved and the new chain is packaged without wiping the current ones.</li>
 </ul>
 
 <h2>6. New Issuance Path</h2>

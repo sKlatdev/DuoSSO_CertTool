@@ -709,9 +709,13 @@ function Test-CertCompliance {
 #   - Exported to Certificates\ folder
 #   - Presented to the user with a numbered selection menu
 #
-# Returns:
-#   "use-existing"  - user selected a chain and it was deployed
-#   "create-new"    - no chains found, or user chose to create new
+# Returns a PSCustomObject with:
+#   Action           - package-existing | create-new
+#   PreserveExisting - if true, do not back up or wipe the old certs
+#   PackageOnly      - if true, stop after packaging artifacts for Duo
+#   RootThumb        - selected or created root thumbprint when available
+#   LeafThumb        - selected or created leaf thumbprint when available
+#   PemPath          - packaged PEM path when available
 # ----------------------------------------------------------------
 function Find-ExistingValidChain {
     param([string]$FQDN)
@@ -733,7 +737,14 @@ function Find-ExistingValidChain {
     if (!$candidates -or $candidates.Count -eq 0) {
         Write-Log "  - No existing non-self-signed certificate candidates found."
         Write-Log "  - Proceeding with self-signed chain creation."
-        return "create-new"
+        return [PSCustomObject]@{
+            Action           = "create-new"
+            PreserveExisting = $false
+            PackageOnly      = $false
+            RootThumb        = ""
+            LeafThumb        = ""
+            PemPath          = ""
+        }
     }
 
     Write-Log "  - Found $(@($candidates).Count) candidate leaf cert(s). Analysing chains..."
@@ -957,13 +968,13 @@ function Find-ExistingValidChain {
         Write-Host ""
         foreach ($opt in $menuOptions) {
             $label = if ($opt.Result.Status -eq "COMPLIANT") {
-                "[$($opt.Index)] Use chain: $($opt.Result.Leaf.Subject)  [COMPLIANT]"
+                "[$($opt.Index)] Package chain: $($opt.Result.Leaf.Subject)  [COMPLIANT]"
             } else {
-                "[$($opt.Index)] Use chain: $($opt.Result.Leaf.Subject)  [PARTIAL - review issues above]"
+                "[$($opt.Index)] Package chain: $($opt.Result.Leaf.Subject)  [PARTIAL - review issues above]"
             }
             Write-Host "  $label"
         }
-        Write-Host "  [$menuIndex] Create a new self-signed certificate chain"
+        Write-Host "  [$menuIndex] Create a new self-signed certificate chain and keep the existing certificates"
         Write-Host ""
 
         $validIndices = (1..$menuIndex) -join "|"
@@ -983,8 +994,27 @@ function Find-ExistingValidChain {
 
     # User chose create-new
     if ($choiceInt -eq $menuIndex) {
+        if ($menuOptions.Count -gt 0) {
+            Write-Log "  - User chose to create a new self-signed certificate chain while preserving the existing certificates."
+            return [PSCustomObject]@{
+                Action           = "create-new"
+                PreserveExisting = $true
+                PackageOnly      = $true
+                RootThumb        = ""
+                LeafThumb        = ""
+                PemPath          = ""
+            }
+        }
+
         Write-Log "  - User chose to create a new self-signed certificate chain."
-        return "create-new"
+        return [PSCustomObject]@{
+            Action           = "create-new"
+            PreserveExisting = $false
+            PackageOnly      = $false
+            RootThumb        = ""
+            LeafThumb        = ""
+            PemPath          = ""
+        }
     }
 
     # User selected an existing chain
@@ -999,7 +1029,7 @@ function Find-ExistingValidChain {
     if ($selected.Status -eq "PARTIAL") {
         Write-Host ""
         Write-Host "  WARNING: This chain has compliance issues that may cause problems with Duo." -ForegroundColor Yellow
-        Write-Host "  The certificate will be deployed but Duo may reject it." -ForegroundColor Yellow
+        Write-Host "  The certificate chain will be packaged, but Duo may reject it." -ForegroundColor Yellow
         Write-Host ""
         do {
             $confirm = (Read-Host "  Type YES to proceed or NO to go back to the menu").Trim().ToUpper()
@@ -1071,16 +1101,9 @@ function Find-ExistingValidChain {
     }
     Write-Host ""
 
-    # Inject and verify
-    Write-Log "`n--- Injecting existing cert into NTDS ---"
-    Inject-IntoNTDS -Cert $selectedLeaf
-
-    Write-Log "`n--- Restarting NTDS + verifying ---"
-    Restart-NTDSAndVerify -Thumbprint $selectedLeaf.Thumbprint -FQDN $FQDN
-
     Write-Log ""
     Write-Log "========================================================"
-    Write-Log "  EXISTING CHAIN DEPLOYED"
+    Write-Log "  EXISTING CHAIN PACKAGED"
     Write-Log "  Status:          $($selected.Status)"
     Write-Log "  Leaf Thumbprint: $($selectedLeaf.Thumbprint)"
     Write-Log "  Root Thumbprint: $($selectedRoot.Thumbprint)"
@@ -1089,7 +1112,14 @@ function Find-ExistingValidChain {
     Write-Log "      $existingRootPem"
     Write-Log "========================================================"
 
-    return "use-existing"
+    return [PSCustomObject]@{
+        Action           = "package-existing"
+        PreserveExisting = $true
+        PackageOnly      = $true
+        RootThumb        = $selectedRoot.Thumbprint
+        LeafThumb        = $selectedLeaf.Thumbprint
+        PemPath          = $existingRootPem
+    }
 }
 
 function Resolve-DCNames {
@@ -1894,6 +1924,33 @@ function Print-Summary {
     Write-Log "========================================================"
 }
 
+function Print-PackageSummary {
+    param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb, [string]$PemPath, [string]$SharedPfx = "")
+
+    Write-Log ""
+    Write-Log "========================================================"
+    Write-Log "  PACKAGE READY  [$Mode]"
+    Write-Log "  DC:              $FQDN"
+    Write-Log "  Root Thumbprint: $RootThumb"
+    Write-Log "  Leaf Thumbprint: $LeafThumb"
+    Write-Log ""
+    Write-Log "  PEM for Duo:"
+    Write-Log "      $PemPath"
+
+    if ($Mode -eq "Multi-DC-Primary") {
+        Write-Log ""
+        Write-Log "  Shared Root PFX:"
+        Write-Log "      $rootPfx"
+    }
+
+    if ($SharedPfx) {
+        Write-Log ""
+        Write-Log "  Shared Root PFX used: $SharedPfx"
+    }
+
+    Write-Log "========================================================"
+}
+
 
 # ================================================================
 # DEPLOY-TO-DC  (used by Agent mode)
@@ -1962,22 +2019,30 @@ function Run-SingleDC {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") {
-        Write-Reports -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
-        return
+    if ($chainDecision.Action -eq "package-existing") {
+        Print-PackageSummary -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb -PemPath $chainDecision.PemPath
+        Write-Reports -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb
+        return $chainDecision
     }
 
-    Write-Log "`n--- Backing up ---"
-    $backup = Backup-CertsBeforeWipe -RunLabel "SingleDC-$($dc.Short)"
+    if (!$chainDecision.PreserveExisting) {
+        Write-Log "`n--- Backing up ---"
+        $backup = Backup-CertsBeforeWipe -RunLabel "SingleDC-$($dc.Short)"
 
-    Confirm-WipeOrRestore -BackupResult $backup -RunLabel "SingleDC-$($dc.Short)"
+        Confirm-WipeOrRestore -BackupResult $backup -RunLabel "SingleDC-$($dc.Short)"
 
-    Write-Log "`n--- Wiping ---"
-    Wipe-Certs
+        Write-Log "`n--- Wiping ---"
+        Wipe-Certs
+    } else {
+        Write-Log "`n--- Preserving existing certificates ---"
+        Write-Log "  - Existing certificates will be kept. A new self-signed chain will be created and packaged only."
+    }
 
     Write-Log "`n--- Root CA ---"
     $root   = New-RootCA
-    Trust-RootCA -RootCert $root
+    if (!$chainDecision.PackageOnly) {
+        Trust-RootCA -RootCert $root
+    }
 
     Write-Log "`n--- LDAPS Leaf Cert ---"
     $signer = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $root.Thumbprint } | Select-Object -First 1
@@ -1986,14 +2051,19 @@ function Run-SingleDC {
     Write-Log "`n--- Validating ---"
     Validate-LdapsCert -Cert $leaf
 
-    Write-Log "`n--- NTDS Injection ---"
-    Inject-IntoNTDS -Cert $leaf
+    if (!$chainDecision.PackageOnly) {
+        Write-Log "`n--- NTDS Injection ---"
+        Inject-IntoNTDS -Cert $leaf
 
-    Write-Log "`n--- Restart + Verify ---"
-    Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
+        Write-Log "`n--- Restart + Verify ---"
+        Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
 
-    Print-Summary -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+        Print-Summary -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    } else {
+        Print-PackageSummary -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint -PemPath $rootPem
+    }
     Write-Reports -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    return [PSCustomObject]@{ Action = "create-new"; PackageOnly = $chainDecision.PackageOnly; RootThumb = $root.Thumbprint; LeafThumb = $leaf.Thumbprint; FQDN = $dc.FQDN }
 }
 
 function Run-MultiDCPrimary {
@@ -2003,22 +2073,30 @@ function Run-MultiDCPrimary {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") {
-        Write-Reports -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
-        return
+    if ($chainDecision.Action -eq "package-existing") {
+        Print-PackageSummary -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb -PemPath $chainDecision.PemPath
+        Write-Reports -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb
+        return $chainDecision
     }
 
-    Write-Log "`n--- Backing up ---"
-    $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCPrimary-$($dc.Short)"
+    if (!$chainDecision.PreserveExisting) {
+        Write-Log "`n--- Backing up ---"
+        $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCPrimary-$($dc.Short)"
 
-    Confirm-WipeOrRestore -BackupResult $backup -RunLabel "MultiDCPrimary-$($dc.Short)"
+        Confirm-WipeOrRestore -BackupResult $backup -RunLabel "MultiDCPrimary-$($dc.Short)"
 
-    Write-Log "`n--- Wiping ---"
-    Wipe-Certs
+        Write-Log "`n--- Wiping ---"
+        Wipe-Certs
+    } else {
+        Write-Log "`n--- Preserving existing certificates ---"
+        Write-Log "  - Existing certificates will be kept. A new chain will be created and packaged only."
+    }
 
     Write-Log "`n--- Root CA ---"
     $root   = New-RootCA
-    Trust-RootCA -RootCert $root
+    if (!$chainDecision.PackageOnly) {
+        Trust-RootCA -RootCert $root
+    }
 
     Write-Log "`n--- LDAPS Leaf Cert ---"
     $signer = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $root.Thumbprint } | Select-Object -First 1
@@ -2027,14 +2105,19 @@ function Run-MultiDCPrimary {
     Write-Log "`n--- Validating ---"
     Validate-LdapsCert -Cert $leaf
 
-    Write-Log "`n--- NTDS Injection ---"
-    Inject-IntoNTDS -Cert $leaf
+    if (!$chainDecision.PackageOnly) {
+        Write-Log "`n--- NTDS Injection ---"
+        Inject-IntoNTDS -Cert $leaf
 
-    Write-Log "`n--- Restart + Verify ---"
-    Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
+        Write-Log "`n--- Restart + Verify ---"
+        Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
 
-    Print-Summary -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+        Print-Summary -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    } else {
+        Print-PackageSummary -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint -PemPath $rootPem
+    }
     Write-Reports -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    return [PSCustomObject]@{ Action = "create-new"; PackageOnly = $chainDecision.PackageOnly; RootThumb = $root.Thumbprint; LeafThumb = $leaf.Thumbprint; FQDN = $dc.FQDN }
 }
 
 function Run-MultiDCSecondary {
@@ -2047,22 +2130,30 @@ function Run-MultiDCSecondary {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") {
-        Write-Reports -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
-        return
+    if ($chainDecision.Action -eq "package-existing") {
+        Print-PackageSummary -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb -PemPath $chainDecision.PemPath -SharedPfx $SharedRootPfxPath
+        Write-Reports -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $chainDecision.RootThumb -LeafThumb $chainDecision.LeafThumb
+        return $chainDecision
     }
 
-    Write-Log "`n--- Backing up ---"
-    $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCSecondary-$($dc.Short)"
+    if (!$chainDecision.PreserveExisting) {
+        Write-Log "`n--- Backing up ---"
+        $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCSecondary-$($dc.Short)"
 
-    Confirm-WipeOrRestore -BackupResult $backup -RunLabel "MultiDCSecondary-$($dc.Short)"
+        Confirm-WipeOrRestore -BackupResult $backup -RunLabel "MultiDCSecondary-$($dc.Short)"
 
-    Write-Log "`n--- Wiping leaf certs only ---"
-    Wipe-Certs -LeafOnly
+        Write-Log "`n--- Wiping leaf certs only ---"
+        Wipe-Certs -LeafOnly
+    } else {
+        Write-Log "`n--- Preserving existing certificates ---"
+        Write-Log "  - Existing certificates will be kept. A new chain will be created and packaged only."
+    }
 
     Write-Log "`n--- Importing Shared Root CA ---"
     $root = Import-SharedRootCA -SharedRootPfxPath $SharedRootPfxPath
-    Trust-RootCA -RootCert $root
+    if (!$chainDecision.PackageOnly) {
+        Trust-RootCA -RootCert $root
+    }
 
     Write-Log "`n--- LDAPS Leaf Cert ---"
     $signer = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $root.Thumbprint } | Select-Object -First 1
@@ -2071,15 +2162,20 @@ function Run-MultiDCSecondary {
     Write-Log "`n--- Validating ---"
     Validate-LdapsCert -Cert $leaf
 
-    Write-Log "`n--- NTDS Injection ---"
-    Inject-IntoNTDS -Cert $leaf
+    if (!$chainDecision.PackageOnly) {
+        Write-Log "`n--- NTDS Injection ---"
+        Inject-IntoNTDS -Cert $leaf
 
-    Write-Log "`n--- Restart + Verify ---"
-    Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
+        Write-Log "`n--- Restart + Verify ---"
+        Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
 
-    Print-Summary -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint `
-        -LeafThumb $leaf.Thumbprint -SharedPfx $SharedRootPfxPath
+        Print-Summary -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint `
+            -LeafThumb $leaf.Thumbprint -SharedPfx $SharedRootPfxPath
+    } else {
+        Print-PackageSummary -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint -PemPath $rootPem -SharedPfx $SharedRootPfxPath
+    }
     Write-Reports -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    return [PSCustomObject]@{ Action = "create-new"; PackageOnly = $chainDecision.PackageOnly; RootThumb = $root.Thumbprint; LeafThumb = $leaf.Thumbprint; FQDN = $dc.FQDN }
 }
 
 function Run-MultiDCAgent {
@@ -2088,7 +2184,14 @@ function Run-MultiDCAgent {
 
     # Step 1: Run Primary on this DC to generate the shared Root CA
     Write-Log "`n--- Running Primary on this DC ---"
-    Run-MultiDCPrimary
+    $primaryResult = Run-MultiDCPrimary
+
+    if ($primaryResult -and $primaryResult.PackageOnly) {
+        Write-Log "`n--- Agent remote deployment skipped ---"
+        Write-Log "  - Primary run was package-only, so no remote deployment will be attempted."
+        Write-Reports -Mode "Multi-DC-Agent" -FQDN $primaryResult.FQDN -RootThumb $primaryResult.RootThumb -LeafThumb $primaryResult.LeafThumb
+        return
+    }
 
     # Step 2: Discover all other DCs
     Write-Log "`n--- Discovering domain controllers ---"

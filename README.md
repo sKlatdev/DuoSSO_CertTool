@@ -7,6 +7,8 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - Interactive mode selection at startup:
   - `Execution` performs changes.
   - `Report-Only` follows the same control flow without mutating cert stores, registry, services, or remote targets.
+- When a usable existing LDAPS chain is found, the tool can package that chain for Duo instead of replacing it.
+- When a usable existing LDAPS chain is found and the operator chooses a new chain, the existing certificates are preserved.
 - Scans existing LDAPS-capable certificate chains before issuing new certificates.
 - Validates Duo-related certificate compliance:
   - RSA key algorithm
@@ -48,6 +50,21 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - Reports are still written so the run can be reviewed and shared.
 - The main log file is also written in `Report-Only` mode.
 - Output paths are based on the current working directory where the script is launched.
+
+## Existing Chain Decision Flow
+
+When the tool finds an existing usable LDAPS certificate chain, it shows the chain details and prompts the operator to choose one of these paths:
+
+- Package the existing chain for Duo:
+  - export the existing chain artifacts
+  - generate the PEM file for Duo upload
+  - do not wipe or replace the current certificates
+- Create a new self-signed chain while preserving the existing certificates:
+  - create and export the new chain artifacts
+  - generate the new PEM file for Duo upload
+  - do not back up, wipe, or remove the current certificates
+
+If no usable existing chain is found, the original rebuild-and-deploy path is used.
 
 ## Generated Artifacts
 
@@ -103,6 +120,7 @@ Non-interactive secondary mode is used by Agent deployments:
 3. Choose the operating mode.
 4. Scan for an existing usable LDAPS chain.
 5. Either deploy the existing chain or back up, wipe, and issue a new chain.
+  If a usable existing chain is found, the operator can instead package the existing chain or create a new packaged chain without removing the current certificates.
 6. Bind the selected leaf certificate to NTDS.
 7. Restart and verify LDAPS in `Execution` mode, or log the planned steps in `Report-Only` mode.
 8. Generate JSON and HTML reports.
