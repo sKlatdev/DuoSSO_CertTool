@@ -235,6 +235,33 @@ function Invoke-FileDelete {
     }
 }
 
+function Invoke-FileCopy {
+    param([string]$SourcePath, [string]$DestinationPath, [string]$Description = "")
+
+    $details = @{
+        SourcePath  = $SourcePath
+        Destination = $DestinationPath
+        Description = $Description
+    }
+
+    Log-PlannedAction -ActionType "FileCopy" -Details $details
+
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Copy-Item -Path $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "FileCopy" -Details $details
+            Write-Log "  - Copied file: $SourcePath -> $DestinationPath"
+            return $true
+        } catch {
+            Write-Log "WARNING: FileCopy failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would copy file: $SourcePath -> $DestinationPath" "INFO"
+        return $true
+    }
+}
+
 function Invoke-DirectoryCreate {
     param([string]$Path, [string]$Description = "")
     
@@ -313,7 +340,24 @@ function Invoke-CertificateImport {
         return $dummyCert
     }
     
-    # Execution mode - actually import (rest continues below)
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            $imported = $null
+            if ($Password) {
+                $imported = Import-PfxCertificate -FilePath $FilePath -CertStoreLocation $Store -Password $Password -ErrorAction Stop
+            } else {
+                $imported = Import-Certificate -FilePath $FilePath -CertStoreLocation $Store -ErrorAction Stop
+            }
+            Log-ExecutedAction -ActionType "CertImport" -Details $details
+            Write-Log "  - Imported certificate: $FilePath -> $Store"
+            return $imported
+        } catch {
+            Write-Log "ERROR: CertImport failed: $($_.Exception.Message)" "ERROR"
+            $RunContext.Errors.Add("CertImport '$FilePath': $($_.Exception.Message)")
+            return $null
+        }
+    }
+
     return $null
 }
 
@@ -433,6 +477,34 @@ function Invoke-RegistryDelete {
     }
 }
 
+function Invoke-RegistryKeyCreate {
+    param([string]$Path, [string]$Description = "")
+
+    if (Test-Path $Path) { return $true }
+
+    $details = @{
+        Path        = $Path
+        Description = $Description
+    }
+
+    Log-PlannedAction -ActionType "RegistryKeyCreate" -Details $details
+
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            New-Item -Path $Path -Force | Out-Null
+            Log-ExecutedAction -ActionType "RegistryKeyCreate" -Details $details
+            Write-Log "  - Created registry key: $Path"
+            return $true
+        } catch {
+            Write-Log "ERROR: RegistryKeyCreate failed: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would create registry key: $Path" "INFO"
+        return $true
+    }
+}
+
 function Invoke-ServiceAction {
     param([string]$Action, [string]$ServiceName, [string]$Description = "")
     
@@ -523,11 +595,8 @@ function Invoke-RemoteCopy {
 # ================================================================
 
 function Ensure-Folders {
-    foreach ($path in @($CertFolder, $BackupDir)) {
-        if (!(Test-Path $path)) {
-            New-Item -ItemType Directory -Path $path | Out-Null
-            Write-Log "  - Created folder: $path"
-        }
+    foreach ($path in @($CertFolder, $BackupDir, $ReportsDir)) {
+        Invoke-DirectoryCreate -Path $path -Description "Required working folder"
     }
 }
 
@@ -941,23 +1010,28 @@ function Find-ExistingValidChain {
     $existingRootPem = Join-Path $CertFolder "Existing-RootCert.pem"
 
     try {
-        Export-Certificate -Cert $selectedLeaf -FilePath $existingLeafCer -Force | Out-Null
+        Invoke-CertificateExport -Certificate $selectedLeaf -FilePath $existingLeafCer -Format "CER" -Description "Existing leaf CER export"
         Write-Log "  - Leaf cert exported: $existingLeafCer"
     } catch {
         Write-Log "  WARNING: Could not export leaf cert: $($_.Exception.Message)" "WARN"
     }
 
     try {
-        Export-PfxCertificate -Cert $selectedLeaf -FilePath $existingLeafPfx -Password $PfxPassword -Force | Out-Null
+        Invoke-CertificateExport -Certificate $selectedLeaf -FilePath $existingLeafPfx -Format "PFX" -Password $PfxPassword -Description "Existing leaf PFX export"
         Write-Log "  - Leaf PFX exported: $existingLeafPfx"
     } catch {
         Write-Log "  WARNING: Could not export leaf PFX (private key may not be exportable): $($_.Exception.Message)" "WARN"
     }
 
     try {
-        Export-Certificate -Cert $selectedRoot -FilePath $existingRootCer -Force | Out-Null
-        if (Test-Path $existingRootPem) { Remove-Item $existingRootPem -Force }
-        & $Certutil -encode $existingRootCer $existingRootPem | Out-Null
+        Invoke-CertificateExport -Certificate $selectedRoot -FilePath $existingRootCer -Format "CER" -Description "Existing root CER export"
+        Invoke-FileDelete -FilePath $existingRootPem -Description "Existing root PEM cleanup"
+        if ($RunContext.RunMode -eq "Execution") {
+            & $Certutil -encode $existingRootCer $existingRootPem | Out-Null
+        } else {
+            Log-PlannedAction -ActionType "ExternalCommand" -Details @{ Command = "certutil -encode"; Input = $existingRootCer; Output = $existingRootPem }
+            Write-Log "  [DRY-RUN] Would encode Root CA CER to PEM" "INFO"
+        }
         Write-Log "  - Root CA CER: $existingRootCer"
         Write-Log "  - Root CA PEM: $existingRootPem"
     } catch {
@@ -969,7 +1043,7 @@ function Find-ExistingValidChain {
     foreach ($inter in $selected.Intermediates) {
         try {
             $interFile = Join-Path $CertFolder "Existing-Intermediate$interIndex.cer"
-            Export-Certificate -Cert $inter -FilePath $interFile -Force | Out-Null
+            Invoke-CertificateExport -Certificate $inter -FilePath $interFile -Format "CER" -Description "Existing intermediate export"
             Write-Log "  - Intermediate $interIndex exported: $interFile"
             $interIndex++
         } catch {
@@ -1071,7 +1145,7 @@ function Backup-CertsBeforeWipe {
 
     $stamp     = Get-Date -Format "yyyyMMdd-HHmmss-fff"      # milliseconds added for uniqueness
     $runBackup = Join-Path $BackupDir "$stamp-$RunLabel"
-    New-Item -ItemType Directory -Path $runBackup | Out-Null
+    Invoke-DirectoryCreate -Path $runBackup -Description "Run-specific backup folder"
 
     Write-Log "  - Backing up to: $runBackup"
 
@@ -1092,7 +1166,7 @@ function Backup-CertsBeforeWipe {
       Where-Object { $_.Subject -match "DuoSSO-RootCA" -or $_.Issuer -match "DuoSSO-RootCA" } |
       ForEach-Object {
         $file = Join-Path $runBackup ("My_" + $_.Thumbprint + ".cer")
-        Export-Certificate -Cert $_ -FilePath $file | Out-Null
+        Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup [My] certificate"
         Write-Log "    Backed up [My]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [My] $($_.Subject)  [$($_.Thumbprint)]"
         Write-Restore "  Import-Certificate -FilePath `"$file`" -CertStoreLocation Cert:\LocalMachine\My"
@@ -1105,7 +1179,7 @@ function Backup-CertsBeforeWipe {
       Where-Object { $_.Subject -match "DuoSSO-RootCA" } |
       ForEach-Object {
         $file = Join-Path $runBackup ("Root_" + $_.Thumbprint + ".cer")
-        Export-Certificate -Cert $_ -FilePath $file | Out-Null
+        Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup [Root] certificate"
         Write-Log "    Backed up [Root]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [Root] $($_.Subject)  [$($_.Thumbprint)]"
         Write-Restore "  Import-Certificate -FilePath `"$file`" -CertStoreLocation Cert:\LocalMachine\Root"
@@ -1125,7 +1199,7 @@ function Backup-CertsBeforeWipe {
       } |
       ForEach-Object {
         $file = Join-Path $runBackup ("LegacySelfSigned_" + $_.Thumbprint + ".cer")
-        Export-Certificate -Cert $_ -FilePath $file | Out-Null
+        Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup legacy self-signed certificate"
         Write-Log "    Backed up [Legacy Self-Signed]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [Legacy Self-Signed] $($_.Subject)  [$($_.Thumbprint)]"
         Write-Restore "  # NOTE: Private key is NOT recoverable. Public cert restored only."
@@ -1153,7 +1227,7 @@ function Backup-CertsBeforeWipe {
             $blob  = (Get-ItemProperty -Path $_.PSPath -Name Blob -ErrorAction SilentlyContinue).Blob
             if ($blob) {
                 $file = Join-Path $runBackup ("NTDS_" + $thumb + ".cer")
-                [System.IO.File]::WriteAllBytes($file, $blob)
+                Invoke-FileWrite -FilePath $file -Content $blob -Description "Backup NTDS certificate blob"
                 Write-Log "    Backed up [NTDS Registry]: $thumb"
                 Write-Restore "  # [NTDS Registry] $thumb"
                 Write-Restore "  `$blob = [System.IO.File]::ReadAllBytes(`"$file`")"
@@ -1294,7 +1368,7 @@ function Wipe-Certs {
       } |
       ForEach-Object {
         Write-Log "    Removing [Legacy Self-Signed]: $($_.Subject) [$($_.Thumbprint)]"
-        Remove-Item "Cert:\LocalMachine\My\$($_.Thumbprint)" -Force
+                Invoke-CertificateDelete -Thumbprint $_.Thumbprint -Store "Cert:\LocalMachine\My" -Description "Legacy self-signed certificate from My"
       }
 
     Write-Log "  - Wipe complete."
@@ -1356,18 +1430,28 @@ function Import-SharedRootCA {
     }
 
     try {
-        $imported = Import-PfxCertificate -FilePath $SharedRootPfxPath `
-            -CertStoreLocation Cert:\LocalMachine\My -Password $PfxPassword -ErrorAction Stop
+        $imported = Invoke-CertificateImport -FilePath $SharedRootPfxPath -Store "Cert:\LocalMachine\My" -Password $PfxPassword -Description "Import shared Root PFX into My"
+        if ($RunContext.RunMode -eq "ReportOnly" -and $imported.Thumbprint -eq "[REPORT-ONLY]") {
+            Write-Log "  [DRY-RUN] Shared Root CA import simulated." "INFO"
+            return @{ Thumbprint = "[REPORT-ONLY-ROOT]"; Subject = "CN=DuoSSO-RootCA" }
+        }
+
+        if (!$imported) { Write-Log "ERROR: Shared Root CA import failed." "ERROR"; exit 1 }
 
         $root = Get-ChildItem Cert:\LocalMachine\My |
             Where-Object { $_.Thumbprint -eq $imported.Thumbprint } | Select-Object -First 1
 
         if (!$root) { Write-Log "ERROR: Imported Root CA not found in store." "ERROR"; exit 1 }
 
-        Copy-Item $SharedRootPfxPath $rootPfx -Force
-        Export-Certificate -Cert $root -FilePath $rootCer -Force | Out-Null
-        if (Test-Path $rootPem) { Remove-Item $rootPem -Force }
-        & $Certutil -encode $rootCer $rootPem | Out-Null
+        Invoke-FileCopy -SourcePath $SharedRootPfxPath -DestinationPath $rootPfx -Description "Copy shared Root PFX to working path"
+        Invoke-CertificateExport -Certificate $root -FilePath $rootCer -Format "CER" -Description "Export imported root CER"
+        Invoke-FileDelete -FilePath $rootPem -Description "Remove existing root PEM"
+        if ($RunContext.RunMode -eq "Execution") {
+            & $Certutil -encode $rootCer $rootPem | Out-Null
+        } else {
+            Log-PlannedAction -ActionType "ExternalCommand" -Details @{ Command = "certutil -encode"; Input = $rootCer; Output = $rootPem }
+            Write-Log "  [DRY-RUN] Would encode Root CA CER to PEM" "INFO"
+        }
 
         Write-Log "  - Shared Root CA imported.  Thumbprint: $($root.Thumbprint)"
         return $root
@@ -1379,7 +1463,7 @@ function Import-SharedRootCA {
 function Trust-RootCA {
     param($RootCert)
     if (!(Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Thumbprint -eq $RootCert.Thumbprint })) {
-        Import-Certificate -FilePath $rootCer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+        Invoke-CertificateImport -FilePath $rootCer -Store "Cert:\LocalMachine\Root" -Description "Trust Root CA in LocalMachine\\Root" | Out-Null
         Write-Log "  - Root CA added to Trusted Root store."
     } else {
         Write-Log "  - Root CA already trusted."
@@ -1456,11 +1540,7 @@ function Inject-IntoNTDS {
     param($Cert)
 
     if (!(Test-Path $NtdsRegPath)) { 
-        if ($RunContext.RunMode -eq "Execution") {
-            New-Item -Path $NtdsRegPath -Force | Out-Null
-        } else {
-            Write-Log "  [DRY-RUN] Would create NTDS registry path" "INFO"
-        }
+        Invoke-RegistryKeyCreate -Path $NtdsRegPath -Description "Create NTDS certificate store path"
     }
 
     # Grant NETWORK SERVICE + SYSTEM read on private key
@@ -1494,17 +1574,12 @@ function Inject-IntoNTDS {
     # Write cert blob into NTDS registry via wrapper
     $regKey = Join-Path $NtdsRegPath $Cert.Thumbprint.ToUpper()
     
-    if ($RunContext.RunMode -eq "ReportOnly") {
-        Write-Log "  [DRY-RUN] Would create registry key: $regKey" "INFO"
-        Write-Log "  [DRY-RUN] Would write cert blob to NTDS registry" "INFO"
-    } else {
-        try {
-            New-Item -Path $regKey -Force | Out-Null
-            Invoke-RegistryWrite -Path $regKey -Name "Blob" -Value $Cert.RawData -Type Binary -Description "NTDS cert binding"
-            Write-Log "  - Cert written to NTDS registry."
-        } catch {
-            Write-Log "ERROR: NTDS registry write failed: $($_.Exception.Message)" "ERROR"; exit 1
-        }
+    try {
+        Invoke-RegistryKeyCreate -Path $regKey -Description "Create NTDS certificate thumbprint key"
+        Invoke-RegistryWrite -Path $regKey -Name "Blob" -Value $Cert.RawData -Type Binary -Description "NTDS cert binding"
+        if ($RunContext.RunMode -eq "Execution") { Write-Log "  - Cert written to NTDS registry." }
+    } catch {
+        Write-Log "ERROR: NTDS registry write failed: $($_.Exception.Message)" "ERROR"; exit 1
     }
 
     if ($RunContext.RunMode -eq "Execution") {
@@ -1705,12 +1780,12 @@ function Write-Reports {
     try {
         # Generate and write JSON report
         $jsonData = Generate-JsonReport -Mode $Mode -FQDN $FQDN -RootThumb $RootThumb -LeafThumb $LeafThumb
-        if ($RunContext.RunMode -eq "Execution") { [System.IO.File]::WriteAllText($jsonFile, $jsonData) }
+        [System.IO.File]::WriteAllText($jsonFile, $jsonData)
         Write-Log "  - Report: $jsonFile"
         
         # Generate and write HTML report
         $htmlData = Generate-HtmlReport -JsonData $jsonData
-        if ($RunContext.RunMode -eq "Execution") { [System.IO.File]::WriteAllText($htmlFile, $htmlData) }
+        [System.IO.File]::WriteAllText($htmlFile, $htmlData)
         Write-Log "  - Report: $htmlFile"
     } catch {
         Write-Log "  WARNING: Report write failed: $($_.Exception.Message)" "WARN"
@@ -1782,16 +1857,19 @@ function Deploy-ToDC {
         $remoteScript = "$remoteAdmin\DuoSSO-CertTool.ps1"
         $remotePfx    = "$remoteCerts\DuoSSO-RootCert-Shared.pfx"
 
-        if (!(Test-Path $remoteCerts)) { New-Item -Path $remoteCerts -ItemType Directory -Force | Out-Null }
-        Copy-Item -Path $PSCommandPath      -Destination $remoteScript -Force
-        Copy-Item -Path $SharedRootPfxPath  -Destination $remotePfx   -Force
+        Invoke-DirectoryCreate -Path $remoteCerts -Description "Create remote Certificates folder on admin share"
+        Invoke-RemoteCopy -SourcePath $PSCommandPath -TargetPath $remoteScript -ComputerName $TargetDC -Description "Copy script to target DC"
+        Invoke-RemoteCopy -SourcePath $SharedRootPfxPath -TargetPath $remotePfx -ComputerName $TargetDC -Description "Copy shared Root PFX to target DC"
         Write-Log "  [Agent]   Copied script and Root PFX to $TargetDC."
 
-        Invoke-Command -ComputerName $TargetDC -ErrorAction Stop -ScriptBlock {
+        $remoteOutput = Invoke-RemoteCommand -ComputerName $TargetDC -Description "Invoke secondary mode on target DC" -ScriptBlock {
             param($script, $pfx)
             & powershell.exe -NonInteractive -ExecutionPolicy Bypass -File $script 3 $pfx
-        } -ArgumentList "C:\Admin\DuoSSO-CertTool.ps1", "C:\Admin\Certificates\DuoSSO-RootCert-Shared.pfx" |
-            ForEach-Object { Write-Log "  [Agent]   [$TargetDC] $_" }
+        } -ArgumentList "C:\Admin\DuoSSO-CertTool.ps1", "C:\Admin\Certificates\DuoSSO-RootCert-Shared.pfx"
+
+        if ($remoteOutput) {
+            $remoteOutput | ForEach-Object { Write-Log "  [Agent]   [$TargetDC] $_" }
+        }
 
         # Confirm success by checking the remote log
         $remoteLog = "\\$TargetDC\C$\Admin\DuoSSO-CertTool.log"
@@ -1824,7 +1902,10 @@ function Run-SingleDC {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") { return }
+    if ($chainDecision -eq "use-existing") {
+        Write-Reports -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
+        return
+    }
 
     Write-Log "`n--- Backing up ---"
     $backup = Backup-CertsBeforeWipe -RunLabel "SingleDC-$($dc.Short)"
@@ -1852,6 +1933,7 @@ function Run-SingleDC {
     Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
 
     Print-Summary -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    Write-Reports -Mode "Single-DC" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
 }
 
 function Run-MultiDCPrimary {
@@ -1861,7 +1943,10 @@ function Run-MultiDCPrimary {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") { return }
+    if ($chainDecision -eq "use-existing") {
+        Write-Reports -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
+        return
+    }
 
     Write-Log "`n--- Backing up ---"
     $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCPrimary-$($dc.Short)"
@@ -1889,6 +1974,7 @@ function Run-MultiDCPrimary {
     Restart-NTDSAndVerify -Thumbprint $leaf.Thumbprint -FQDN $dc.FQDN
 
     Print-Summary -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
+    Write-Reports -Mode "Multi-DC-Primary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
 }
 
 function Run-MultiDCSecondary {
@@ -1901,7 +1987,10 @@ function Run-MultiDCSecondary {
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
 
     $chainDecision = Find-ExistingValidChain -FQDN $dc.FQDN
-    if ($chainDecision -eq "use-existing") { return }
+    if ($chainDecision -eq "use-existing") {
+        Write-Reports -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb "existing-chain" -LeafThumb "existing-chain"
+        return
+    }
 
     Write-Log "`n--- Backing up ---"
     $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCSecondary-$($dc.Short)"
@@ -1930,6 +2019,7 @@ function Run-MultiDCSecondary {
 
     Print-Summary -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint `
         -LeafThumb $leaf.Thumbprint -SharedPfx $SharedRootPfxPath
+    Write-Reports -Mode "Multi-DC-Secondary" -FQDN $dc.FQDN -RootThumb $root.Thumbprint -LeafThumb $leaf.Thumbprint
 }
 
 function Run-MultiDCAgent {
@@ -1955,6 +2045,7 @@ function Run-MultiDCAgent {
     if (!$otherDCs -or $otherDCs.Count -eq 0) {
         Write-Log "  - No additional DCs found. Single-DC environment."
         Print-Summary -Mode "Multi-DC-Agent" -FQDN $thisFQDN -RootThumb "see above" -LeafThumb "see above"
+        Write-Reports -Mode "Multi-DC-Agent" -FQDN $thisFQDN -RootThumb "see above" -LeafThumb "see above"
         return
     }
 
@@ -1987,6 +2078,7 @@ function Run-MultiDCAgent {
     }
 
     Print-Summary -Mode "Multi-DC-Agent" -FQDN $thisFQDN -RootThumb "see above" -LeafThumb "see above"
+    Write-Reports -Mode "Multi-DC-Agent" -FQDN $thisFQDN -RootThumb "see above" -LeafThumb "see above"
 }
 
 
@@ -2001,6 +2093,8 @@ Test-PreflightRequirements -Mode "Interactive"
 Initialize-PfxPassword
 
 if ($args.Count -ge 2 -and $args[0] -eq "3") {
+    $RunContext = Initialize-RunContext -RunMode "Execution"
+    $RunContext.Interactive = $false
     Run-MultiDCSecondary -SharedRootPfxPath $args[1]
     exit 0
 }
