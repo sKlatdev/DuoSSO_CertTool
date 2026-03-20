@@ -72,7 +72,7 @@ The script writes or plans the following under its working directory:
 
 - `Certificates\`
   - exported root CER / PEM / PFX
-  - exported LDAPS CER / PFX
+  - exported LDAPS CER
   - existing-chain exports when that path is selected
 - `Certificates\Backups\`
   - per-run backup folders

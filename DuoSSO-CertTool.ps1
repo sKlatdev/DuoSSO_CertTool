@@ -191,7 +191,6 @@ $rootPem  = Join-Path $CertFolder "DuoSSO-RootCert.pem"
 $rootPfx  = Join-Path $CertFolder "DuoSSO-RootCert.pfx"
 $sharedRootPfx = Join-Path $CertFolder "DuoSSO-RootCert-Shared.pfx"
 $ldapsCer = Join-Path $CertFolder "DuoSSO-LDAPS.cer"
-$ldapsPfx = Join-Path $CertFolder "DuoSSO-LDAPS.pfx"
 
 
 # ================================================================
@@ -1063,7 +1062,6 @@ function Find-ExistingValidChain {
 
     # Export selected chain to Certificates\ folder
     $existingLeafCer = Join-Path $CertFolder "Existing-LDAPS.cer"
-    $existingLeafPfx = Join-Path $CertFolder "Existing-LDAPS.pfx"
     $existingRootCer = Join-Path $CertFolder "Existing-RootCert.cer"
     $existingRootPem = Join-Path $CertFolder "Existing-RootCert.pem"
 
@@ -1072,13 +1070,6 @@ function Find-ExistingValidChain {
         Write-Log "  - Leaf cert exported: $existingLeafCer"
     } catch {
         Write-Log "  WARNING: Could not export leaf cert: $($_.Exception.Message)" "WARN"
-    }
-
-    try {
-        Invoke-CertificateExport -Certificate $selectedLeaf -FilePath $existingLeafPfx -Format "PFX" -Password $PfxPassword -Description "Existing leaf PFX export"
-        Write-Log "  - Leaf PFX exported: $existingLeafPfx"
-    } catch {
-        Write-Log "  WARNING: Could not export leaf PFX (private key may not be exportable): $($_.Exception.Message)" "WARN"
     }
 
     try {
@@ -1112,7 +1103,6 @@ function Find-ExistingValidChain {
     Write-Host ""
     Write-Host "  Exported to Certificates\ folder:"
     Write-Host "    Leaf CER: $existingLeafCer"
-    Write-Host "    Leaf PFX: $existingLeafPfx"
     Write-Host "    Root CER: $existingRootCer"
     Write-Host "    Root PEM: $existingRootPem  <-- upload this to Duo"
     if ($selected.Intermediates.Count -gt 0) {
@@ -1629,9 +1619,6 @@ function New-LdapsCert {
     if (!$leaf -or !$leaf.Thumbprint) { Write-Log "ERROR: LDAPS cert returned null." "ERROR"; exit 1 }
 
     Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsCer -Format "CER" -Description "LDAPS Leaf CER"
-    Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsPfx -Format "PFX" -Password $script:PfxPassword -Description "LDAPS Leaf PFX"
-    if ($RunContext.RunMode -eq "Execution" -and !(Test-Path $ldapsPfx)) { Write-Log "ERROR: LDAPS leaf PFX was not created: $ldapsPfx" "ERROR"; exit 1 }
-
     Write-Log "  - Leaf cert created."
     Write-Log "    Subject: $($leaf.Subject)  Issuer: $($leaf.Issuer)"
     Write-Log "    Thumbprint: $($leaf.Thumbprint)  NotAfter: $($leaf.NotAfter)"
