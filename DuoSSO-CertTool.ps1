@@ -176,6 +176,7 @@ function Log-ExecutedAction {
 $rootCer  = Join-Path $CertFolder "DuoSSO-RootCert.cer"
 $rootPem  = Join-Path $CertFolder "DuoSSO-RootCert.pem"
 $rootPfx  = Join-Path $CertFolder "DuoSSO-RootCert.pfx"
+$sharedRootPfx = Join-Path $CertFolder "DuoSSO-RootCert-Shared.pfx"
 $ldapsCer = Join-Path $CertFolder "DuoSSO-LDAPS.cer"
 $ldapsPfx = Join-Path $CertFolder "DuoSSO-LDAPS.pfx"
 
@@ -604,7 +605,7 @@ function Invoke-RemoteCopy {
 # ================================================================
 
 function Ensure-Folders {
-    foreach ($path in @($CertFolder, $BackupDir, $ReportsDir)) {
+    foreach ($path in @($CertFolder, $BackupDir)) {
         Invoke-DirectoryCreate -Path $path -Description "Required working folder"
     }
 }
@@ -1515,6 +1516,7 @@ function New-RootCA {
     }
     
     Invoke-CertificateExport -Certificate $root -FilePath $rootPfx -Format "PFX" -Password $PfxPassword -Description "Root CA PFX"
+    Invoke-FileCopy -SourcePath $rootPfx -DestinationPath $sharedRootPfx -Description "Shared Root PFX for secondary DCs"
 
     Write-Log "  - Root CA created.  Thumbprint: $($root.Thumbprint)  NotAfter: $($root.NotAfter)"
     return $root
@@ -1542,6 +1544,7 @@ function Import-SharedRootCA {
         if (!$root) { Write-Log "ERROR: Imported Root CA not found in store." "ERROR"; exit 1 }
 
         Invoke-FileCopy -SourcePath $SharedRootPfxPath -DestinationPath $rootPfx -Description "Copy shared Root PFX to working path"
+        Invoke-FileCopy -SourcePath $SharedRootPfxPath -DestinationPath $sharedRootPfx -Description "Copy shared Root PFX to standard shared path"
         Invoke-CertificateExport -Certificate $root -FilePath $rootCer -Format "CER" -Description "Export imported root CER"
         Invoke-FileDelete -FilePath $rootPem -Description "Remove existing root PEM"
         if ($RunContext.RunMode -eq "Execution") {
@@ -1895,14 +1898,10 @@ function Write-Reports {
     param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb)
     
     if (!$RunContext) { return }
-
-    if (!(Test-Path $ReportsDir)) {
-        [System.IO.Directory]::CreateDirectory($ReportsDir) | Out-Null
-    }
     
     $timestamp = $RunContext.SessionId
-    $jsonFile = Join-Path $ReportsDir "Report-$timestamp.json"
-    $htmlFile = Join-Path $ReportsDir "Report-$timestamp.html"
+    $jsonFile = Join-Path $WorkingDir "DuoSSO-CertTool-Report-$timestamp.json"
+    $htmlFile = Join-Path $WorkingDir "DuoSSO-CertTool-Report-$timestamp.html"
     
     try {
         # Generate and write JSON report
@@ -1940,8 +1939,11 @@ function Print-Summary {
             Write-Log "      $rootPem"
             Write-Log ""
             Write-Log "  *** Distribute Root PFX to all secondary DCs ***"
-            Write-Log "      $rootPfx"
+            Write-Log "      $sharedRootPfx"
             Write-Log "      Password will be displayed separately after execution."
+            Write-Log ""
+            Write-Log "  Secondary mode path to use:"
+            Write-Log "      $sharedRootPfx"
         }
         "Multi-DC-Secondary" {
             Write-Log "  Shared Root PFX used: $SharedPfx"
@@ -1977,7 +1979,10 @@ function Print-PackageSummary {
     if ($Mode -eq "Multi-DC-Primary") {
         Write-Log ""
         Write-Log "  Shared Root PFX:"
-        Write-Log "      $rootPfx"
+        Write-Log "      $sharedRootPfx"
+        Write-Log ""
+        Write-Log "  Secondary mode path to use:"
+        Write-Log "      $sharedRootPfx"
     }
 
     if ($SharedPfx) {
@@ -2298,7 +2303,7 @@ function Run-MultiDCAgent {
     $otherDCs | ForEach-Object { Write-Log "    $_" }
 
     # Step 3: Deploy to each secondary DC
-    $results = $otherDCs | ForEach-Object { Deploy-ToDC -TargetDC $_ -SharedRootPfxPath $rootPfx }
+    $results = $otherDCs | ForEach-Object { Deploy-ToDC -TargetDC $_ -SharedRootPfxPath $sharedRootPfx }
 
     # Step 4: Agent summary
     Write-Log ""
@@ -2318,7 +2323,7 @@ function Run-MultiDCAgent {
     if ($failed.Count -gt 0) {
         Write-Log ""
         Write-Log "  For failed DCs, distribute the Root PFX manually and run mode [3]:"
-        Write-Log "    Root PFX: $rootPfx  (password: $PlainPfxPass)"
+        Write-Log "    Root PFX: $sharedRootPfx  (password: $PlainPfxPass)"
         $failed | ForEach-Object { Write-Log "    - $($_.DC)" }
     }
 

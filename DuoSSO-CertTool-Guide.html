@@ -87,7 +87,7 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <ul>
 <li>Creates the shared root CA.</li>
 <li>Issues the local DC leaf certificate.</li>
-<li>Exports the shared root PFX for secondary domain controllers.</li>
+<li>Exports the shared root PFX for secondary domain controllers at <code>Certificates\DuoSSO-RootCert-Shared.pfx</code>.</li>
 <li>Upload the PEM to Duo once for the environment.</li>
 </ul>
 
@@ -116,7 +116,7 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 
 <div class="note">
 <strong>Expected Report-Only artifacts</strong><br>
-The intended filesystem output in Report-Only mode is the generated report set in <code>Reports\</code> plus the main <code>DuoSSO-CertTool.log</code> file in the working directory.
+The intended filesystem output in Report-Only mode is the generated report files in the working directory plus the main <code>DuoSSO-CertTool.log</code> file.
 </div>
 
 <h2>5. Existing Chain Path</h2>
@@ -146,8 +146,8 @@ The intended filesystem output in Report-Only mode is the generated report set i
 <li><code>Certificates\</code>: exported root and leaf certificate artifacts.</li>
 <li><code>Backup\</code>: backup folders for certificate recovery.</li>
 <li><code>Backup\RESTORE-INSTRUCTIONS.log</code>: execution-mode restore script guidance.</li>
-<li><code>Reports\Report-&lt;session&gt;.json</code>: structured run ledger.</li>
-<li><code>Reports\Report-&lt;session&gt;.html</code>: human-readable run summary.</li>
+<li><code>DuoSSO-CertTool-Report-&lt;session&gt;.json</code>: structured run ledger in the working directory.</li>
+<li><code>DuoSSO-CertTool-Report-&lt;session&gt;.html</code>: human-readable run summary in the working directory.</li>
 <li><code>DuoSSO-CertTool.log</code>: console log written in both execution modes.</li>
 </ul>
 

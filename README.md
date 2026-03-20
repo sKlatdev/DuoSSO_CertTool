@@ -30,7 +30,7 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
   - Upload the generated root PEM to Duo after the run.
 - `Multi-DC Primary`
   - Creates a shared root CA and issues a local leaf cert.
-  - Export the shared root PFX for secondary DCs.
+  - Export the shared root PFX for secondary DCs at `Certificates\DuoSSO-RootCert-Shared.pfx`.
   - Upload the generated root PEM to Duo once.
 - `Multi-DC Secondary`
   - Imports the shared root PFX.
@@ -77,9 +77,8 @@ The script writes or plans the following under its working directory:
 - `Backup\`
   - per-run backup folders
   - `RESTORE-INSTRUCTIONS.log` in `Execution` mode
-- `Reports\`
-  - `Report-<session>.json`
-  - `Report-<session>.html`
+- `DuoSSO-CertTool-Report-<session>.json`
+- `DuoSSO-CertTool-Report-<session>.html`
 - `DuoSSO-CertTool.log`
   - written in both `Execution` and `Report-Only` modes
 
