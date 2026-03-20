@@ -207,22 +207,22 @@ function Invoke-FileWrite {
                 Add-Content -Path $FilePath -Value $Content -NoNewline -Encoding $Encoding
             }
             Log-ExecutedAction -ActionType "FileWrite" -Details $details
-            return $true
+            return
         } catch {
             Write-Log "ERROR: FileWrite failed: $($_.Exception.Message)" "ERROR"
             $RunContext.Errors.Add("FileWrite '$FilePath': $($_.Exception.Message)")
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would write file: $FilePath" "INFO"
-        return $true
+        return
     }
 }
 
 function Invoke-FileDelete {
     param([string]$FilePath, [string]$Description = "")
     
-    if (!(Test-Path $FilePath)) { return $true }  # Already gone
+    if (!(Test-Path $FilePath)) { return }  # Already gone
     
     $details = @{
         Path        = $FilePath
@@ -235,14 +235,14 @@ function Invoke-FileDelete {
         try {
             Remove-Item -Path $FilePath -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "FileDelete" -Details $details
-            return $true
+            return
         } catch {
             Write-Log "WARNING: FileDelete failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would delete file: $FilePath" "INFO"
-        return $true
+        return
     }
 }
 
@@ -262,21 +262,21 @@ function Invoke-FileCopy {
             Copy-Item -Path $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "FileCopy" -Details $details
             Write-Log "  - Copied file: $SourcePath -> $DestinationPath"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: FileCopy failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would copy file: $SourcePath -> $DestinationPath" "INFO"
-        return $true
+        return
     }
 }
 
 function Invoke-DirectoryCreate {
     param([string]$Path, [string]$Description = "")
     
-    if (Test-Path $Path) { return $true }  # Already exists
+    if (Test-Path $Path) { return }  # Already exists
     
     $details = @{
         Path        = $Path
@@ -290,14 +290,14 @@ function Invoke-DirectoryCreate {
             New-Item -ItemType Directory -Path $Path -Force | Out-Null
             Log-ExecutedAction -ActionType "DirectoryCreate" -Details $details
             Write-Log "  - Created folder: $Path"
-            return $true
+            return
         } catch {
             Write-Log "ERROR: DirectoryCreate failed: $($_.Exception.Message)" "ERROR"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would create directory: $Path" "INFO"
-        return $true
+        return
     }
 }
 
@@ -375,7 +375,7 @@ function Invoke-CertificateImport {
 function Invoke-CertificateExport {
     param([object]$Certificate, [string]$FilePath, [string]$Format = "CER", [object]$Password = $null, [string]$Description = "")
     
-    if (!$Certificate) { return $false }
+    if (!$Certificate) { return }
     
     $details = @{
         CertSubject = $Certificate.Subject
@@ -394,14 +394,14 @@ function Invoke-CertificateExport {
             }
             Log-ExecutedAction -ActionType "CertExport" -Details $details
                 Write-Log "  - Exported ${Format}: $FilePath"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: CertExport failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would export certificate to: $FilePath" "INFO"
-        return $true
+        return
     }
 }
 
@@ -421,14 +421,14 @@ function Invoke-CertificateDelete {
             Remove-Item "$Store\$Thumbprint" -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "CertDelete" -Details $details
             Write-Log "  - Deleted cert: $Thumbprint from $Store"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: CertDelete failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would delete certificate: $Thumbprint from $Store" "INFO"
-        return $true
+        return
     }
 }
 
@@ -449,21 +449,21 @@ function Invoke-RegistryWrite {
             Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "RegistryWrite" -Details $details
             Write-Log "  - Registry write: $Path\$Name"
-            return $true
+            return
         } catch {
             Write-Log "ERROR: Registry write failed: $($_.Exception.Message)" "ERROR"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would write registry: $Path\$Name" "INFO"
-        return $true
+        return
     }
 }
 
 function Invoke-RegistryDelete {
     param([string]$Path, [string]$Description = "")
     
-    if (!(Test-Path $Path)) { return $true }
+    if (!(Test-Path $Path)) { return }
     
     $details = @{
         Path        = $Path
@@ -477,21 +477,21 @@ function Invoke-RegistryDelete {
             Remove-Item -Path $Path -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "RegistryDelete" -Details $details
             Write-Log "  - Deleted registry: $Path"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: RegistryDelete failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would delete registry: $Path" "INFO"
-        return $true
+        return
     }
 }
 
 function Invoke-RegistryKeyCreate {
     param([string]$Path, [string]$Description = "")
 
-    if (Test-Path $Path) { return $true }
+    if (Test-Path $Path) { return }
 
     $details = @{
         Path        = $Path
@@ -505,14 +505,14 @@ function Invoke-RegistryKeyCreate {
             New-Item -Path $Path -Force | Out-Null
             Log-ExecutedAction -ActionType "RegistryKeyCreate" -Details $details
             Write-Log "  - Created registry key: $Path"
-            return $true
+            return
         } catch {
             Write-Log "ERROR: RegistryKeyCreate failed: $($_.Exception.Message)" "ERROR"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would create registry key: $Path" "INFO"
-        return $true
+        return
     }
 }
 
@@ -536,14 +536,14 @@ function Invoke-ServiceAction {
             }
             Log-ExecutedAction -ActionType "ServiceAction" -Details $details
             Write-Log "  - Service $Action`: $ServiceName"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: ServiceAction failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would $Action service: $ServiceName" "INFO"
-        return $true
+        return
     }
 }
 
@@ -589,14 +589,14 @@ function Invoke-RemoteCopy {
             Copy-Item -Path $SourcePath -Destination $TargetPath -Force -ErrorAction Stop
             Log-ExecutedAction -ActionType "RemoteCopy" -Details $details
             Write-Log "  - Remote copy: $SourcePath → $TargetPath on $ComputerName"
-            return $true
+            return
         } catch {
             Write-Log "WARNING: RemoteCopy failed: $($_.Exception.Message)" "WARN"
-            return $false
+            return
         }
     } else {
         Write-Log "  [DRY-RUN] Would copy to remote: $SourcePath → $ComputerName\$TargetPath" "INFO"
-        return $true
+        return
     }
 }
 
