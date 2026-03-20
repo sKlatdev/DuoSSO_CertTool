@@ -723,19 +723,19 @@ function Find-ExistingValidChain {
     Write-Log "`n--- Scanning for existing LDAPS certificate chains ---"
 
     # Collect all leaf candidates: has private key, Server Authentication EKU,
-    # not self-signed, not expired, not our own DuoSSO-issued cert
+    # not self-signed. This intentionally includes DuoSSO-issued leaf certs so
+    # an already-usable DuoSSO chain is offered for packaging instead of forcing
+    # cleanup and re-issuance.
     $candidates = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
         Where-Object {
             $_.HasPrivateKey -and
             ($_.EnhancedKeyUsageList.FriendlyName -contains "Server Authentication" -or
              $_.EnhancedKeyUsageList.Count -eq 0) -and   # also catch certs with no EKU (will fail compliance)
-            $_.Subject -ne $_.Issuer -and                 # exclude self-signed
-            $_.Subject -notmatch "DuoSSO-RootCA" -and     # exclude our own CA cert
-            $_.Issuer  -notmatch "DuoSSO-RootCA"          # exclude our own leaf cert
+            $_.Subject -ne $_.Issuer                      # exclude self-signed
         }
 
     if (!$candidates -or $candidates.Count -eq 0) {
-        Write-Log "  - No existing non-self-signed certificate candidates found."
+        Write-Log "  - No existing usable certificate candidates found."
         Write-Log "  - Proceeding with self-signed chain creation."
         return [PSCustomObject]@{
             Action           = "create-new"
@@ -1385,6 +1385,43 @@ function Confirm-WipeOrRestore {
     Write-Log "  - User confirmed continuation despite irrecoverable items."
 }
 
+function Get-CleanupDecision {
+    param([string]$CleanupScope)
+
+    Write-Host ""
+    Write-Host "  ========================================================"
+    Write-Host "  NO USABLE EXISTING CHAIN FOUND"
+    Write-Host "  ========================================================"
+    Write-Host ""
+    Write-Host "  A new self-signed chain can be created, but existing certificates may still"
+    Write-Host "  be present on this server and could cause confusion or conflicts later."
+    Write-Host ""
+    Write-Host "  [R] Remove old certificates after backup, then continue"
+    Write-Host "      Scope: $CleanupScope"
+    Write-Host "  [K] Keep current certificates and continue anyway"
+    Write-Host "  [C] Cancel and exit"
+    Write-Host ""
+
+    do {
+        $choice = (Invoke-InteractivePrompt -Prompt "Select cleanup action (R/K/C)" -ValidAnswers @("R", "K", "C")).Trim().ToUpper()
+    } while ($choice -notin @("R", "K", "C"))
+
+    switch ($choice) {
+        "R" {
+            Write-Log "  - User chose to back up and remove old certificates before continuing."
+            return "remove"
+        }
+        "K" {
+            Write-Log "  - User chose to keep the current certificates and continue."
+            return "keep"
+        }
+        "C" {
+            Write-Log "  - User chose to cancel before any cleanup or new certificate creation." "WARN"
+            return "cancel"
+        }
+    }
+}
+
 function Wipe-Certs {
     param([switch]$LeafOnly)
 
@@ -2026,6 +2063,16 @@ function Run-SingleDC {
     }
 
     if (!$chainDecision.PreserveExisting) {
+        $cleanupDecision = Get-CleanupDecision -CleanupScope "DuoSSO and legacy LDAPS certificates in LocalMachine\\My, LocalMachine\\Root, and NTDS bindings"
+
+        if ($cleanupDecision -eq "cancel") {
+            Write-Host ""
+            Write-Host "  Cancelled. No changes were made."
+            Write-Host ""
+            return
+        }
+
+        if ($cleanupDecision -eq "remove") {
         Write-Log "`n--- Backing up ---"
         $backup = Backup-CertsBeforeWipe -RunLabel "SingleDC-$($dc.Short)"
 
@@ -2033,6 +2080,11 @@ function Run-SingleDC {
 
         Write-Log "`n--- Wiping ---"
         Wipe-Certs
+        } else {
+            $chainDecision.PreserveExisting = $true
+            Write-Log "`n--- Skipping cleanup ---"
+            Write-Log "  - Existing certificates will remain while the new chain is created."
+        }
     } else {
         Write-Log "`n--- Preserving existing certificates ---"
         Write-Log "  - Existing certificates will be kept. A new self-signed chain will be created and packaged only."
@@ -2080,6 +2132,16 @@ function Run-MultiDCPrimary {
     }
 
     if (!$chainDecision.PreserveExisting) {
+        $cleanupDecision = Get-CleanupDecision -CleanupScope "DuoSSO and legacy LDAPS certificates in LocalMachine\\My, LocalMachine\\Root, and NTDS bindings"
+
+        if ($cleanupDecision -eq "cancel") {
+            Write-Host ""
+            Write-Host "  Cancelled. No changes were made."
+            Write-Host ""
+            return
+        }
+
+        if ($cleanupDecision -eq "remove") {
         Write-Log "`n--- Backing up ---"
         $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCPrimary-$($dc.Short)"
 
@@ -2087,6 +2149,11 @@ function Run-MultiDCPrimary {
 
         Write-Log "`n--- Wiping ---"
         Wipe-Certs
+        } else {
+            $chainDecision.PreserveExisting = $true
+            Write-Log "`n--- Skipping cleanup ---"
+            Write-Log "  - Existing certificates will remain while the new chain is created."
+        }
     } else {
         Write-Log "`n--- Preserving existing certificates ---"
         Write-Log "  - Existing certificates will be kept. A new chain will be created and packaged only."
@@ -2137,6 +2204,16 @@ function Run-MultiDCSecondary {
     }
 
     if (!$chainDecision.PreserveExisting) {
+        $cleanupDecision = Get-CleanupDecision -CleanupScope "DuoSSO and legacy LDAPS leaf certificates in LocalMachine\\My plus NTDS bindings"
+
+        if ($cleanupDecision -eq "cancel") {
+            Write-Host ""
+            Write-Host "  Cancelled. No changes were made."
+            Write-Host ""
+            return
+        }
+
+        if ($cleanupDecision -eq "remove") {
         Write-Log "`n--- Backing up ---"
         $backup = Backup-CertsBeforeWipe -RunLabel "MultiDCSecondary-$($dc.Short)"
 
@@ -2144,6 +2221,11 @@ function Run-MultiDCSecondary {
 
         Write-Log "`n--- Wiping leaf certs only ---"
         Wipe-Certs -LeafOnly
+        } else {
+            $chainDecision.PreserveExisting = $true
+            Write-Log "`n--- Skipping cleanup ---"
+            Write-Log "  - Existing certificates will remain while the new chain is created."
+        }
     } else {
         Write-Log "`n--- Preserving existing certificates ---"
         Write-Log "  - Existing certificates will be kept. A new chain will be created and packaged only."
