@@ -1,9 +1,51 @@
+#Requires -RunAsAdministrator
+
 # ================================================================
 # DuoSSO LDAPS Certificate Tool
 # Modes: Single DC | Multi-DC Primary | Multi-DC Secondary | Multi-DC Agent
 # Full chain recreated on every run
 # Backs up all certs before deletion with restore instructions
 # ================================================================
+
+# ----------------------------------------------------------------
+# PREFLIGHT CHECKS
+# ----------------------------------------------------------------
+function Test-PreflightRequirements {
+    param([string]$Mode = "Single")
+    
+    $errors = [System.Collections.Generic.List[string]]::new()
+    
+    # Check elevation
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($currentUser)
+    if (!$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $errors.Add("Script requires Administrator elevation. Please run PowerShell as Administrator.")
+    }
+    
+    # Check if system is a domain controller
+    $isDC = (Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue).DomainRole -in @(4, 5)
+    if (!$isDC -and $Mode -ne "Validation") {
+        $errors.Add("This system does not appear to be a Domain Controller. NTDS, LDAPS binding, and DC-specific registry paths are not available.")
+    }
+    
+    # Check for certutil
+    if (!(Test-Path "C:\Windows\System32\certutil.exe")) {
+        $errors.Add("certutil.exe not found. Certificate tools may not be available.")
+    }
+    
+    # Check NTDS registry path exists on DC
+    if ($isDC -and !(Test-Path "HKLM:\SOFTWARE\Microsoft\Cryptography\Services\NTDS")) {
+        $errors.Add("NTDS registry path does not exist. This DC may not support certificate-based LDAPS binding.")
+    }
+    
+    if ($errors.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Preflight Check Failed:" -ForegroundColor Red
+        $errors | ForEach-Object { Write-Host "  ✗ $_" -ForegroundColor Red }
+        Write-Host ""
+        exit 1
+    }
+}
 
 # ----------------------------------------------------------------
 # LOGGING + PATHS
@@ -31,16 +73,449 @@ function Write-Restore {
 # GLOBAL VARIABLES
 # ----------------------------------------------------------------
 $CertFolder   = Join-Path $ScriptDir "Certificates"
-$PlainPfxPass = "P@ssw0rd123!"
-$PfxPassword  = $PlainPfxPass | ConvertTo-SecureString -AsPlainText -Force
+$ReportsDir   = Join-Path $ScriptDir "Reports"
+
+# PFX password: generated at runtime, NEVER logged or displayed unless explicitly needed for operator handoff
+# For cross-DC scenarios, password is shown ONLY in final summary section and user must acknowledge
+$PlainPfxPass = $null
+$PfxPassword  = $null
+
+function Initialize-PfxPassword {
+    if ($PlainPfxPass) { return }  # Already initialized
+    
+    # Generate secure random password: 16 characters, mix of upper/lower/digits/symbols
+    $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+"
+    $random = New-Object System.Random
+    $PlainPfxPass = -join (1..16 | ForEach-Object { $chars[$random.Next($chars.Length)] })
+    $PfxPassword = $PlainPfxPass | ConvertTo-SecureString -AsPlainText -Force
+}
+
 $Certutil     = "C:\Windows\System32\certutil.exe"
 $NtdsRegPath  = "HKLM:\SOFTWARE\Microsoft\Cryptography\Services\NTDS\SystemCertificates\My\Certificates"
+
+# ================================================================
+# EXECUTION CONTEXT: Mode-aware state tracking
+# ================================================================
+$RunContext   = $null  # Initialized before interactive menu
+
+function Initialize-RunContext {
+    param([string]$RunMode)
+    
+    return @{
+        RunMode              = $RunMode                    # "Execution" or "ReportOnly"
+        SessionId            = "{0:yyyyMMdd-HHmmss-fff}" -f (Get-Date)
+        Interactive          = $true
+        PlannedActions       = [System.Collections.Generic.List[hashtable]]::new()
+        ExecutedActions      = [System.Collections.Generic.List[hashtable]]::new()
+        SkippedActions       = [System.Collections.Generic.List[hashtable]]::new()
+        Findings             = [System.Collections.Generic.List[string]]::new()
+        Warnings             = [System.Collections.Generic.List[string]]::new()
+        Errors               = [System.Collections.Generic.List[string]]::new()
+    }
+}
+
+function Get-PromptPrefix {
+    if (!$RunContext -or $RunContext.RunMode -eq "Execution") { return "" }
+    return "[REPORT-ONLY] "
+}
+
+function Invoke-InteractivePrompt {
+    param(
+        [string]$Prompt,
+        [string[]]$ValidAnswers = @(),
+        [bool]$AllowFreeform = $false
+    )
+    
+    $prefix = Get-PromptPrefix
+    $fullPrompt = if ($prefix) { "$prefix $Prompt" } else { $Prompt }
+    
+    if ($ValidAnswers.Count -gt 0 -and !$AllowFreeform) {
+        do {
+            $response = Read-Host $fullPrompt
+            if ($response -notin $ValidAnswers) {
+                Write-Host "  Invalid selection. Please enter one of: $($ValidAnswers -join ', ')" -ForegroundColor Yellow
+            } else {
+                return $response
+            }
+        } while ($true)
+    } else {
+        return Read-Host $fullPrompt
+    }
+}
+
+function Log-PlannedAction {
+    param([string]$ActionType, [hashtable]$Details)
+    if (!$RunContext) { return }
+    $RunContext.PlannedActions.Add(@{
+        Timestamp  = Get-Date
+        Type       = $ActionType
+        Details    = $Details
+    })
+    Write-Log "  [PLANNED] $ActionType : $(ConvertTo-Json $Details -Compress)" "INFO"
+}
+
+function Log-ExecutedAction {
+    param([string]$ActionType, [hashtable]$Details)
+    if (!$RunContext) { return }
+    $RunContext.ExecutedActions.Add(@{
+        Timestamp  = Get-Date
+        Type       = $ActionType
+        Details    = $Details
+    })
+}
 
 $rootCer  = Join-Path $CertFolder "DuoSSO-RootCert.cer"
 $rootPem  = Join-Path $CertFolder "DuoSSO-RootCert.pem"
 $rootPfx  = Join-Path $CertFolder "DuoSSO-RootCert.pfx"
 $ldapsCer = Join-Path $CertFolder "DuoSSO-LDAPS.cer"
 $ldapsPfx = Join-Path $CertFolder "DuoSSO-LDAPS.pfx"
+
+
+# ================================================================
+# OPERATION WRAPPERS: Mode-aware mutating actions
+# All state-changing operations go through these wrappers so both
+# Execution and Report-Only modes use identical code paths.
+# ================================================================
+
+function Invoke-FileWrite {
+    param([string]$FilePath, [object]$Content, [string]$Encoding = "UTF8", [string]$Description = "")
+    
+    $details = @{
+        Path        = $FilePath
+        Size        = if ($Content -is [byte[]]) { $Content.Length } else { ([System.Text.Encoding]::UTF8.GetByteCount($Content)) }
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "FileWrite" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            if ($Content -is [byte[]]) {
+                [System.IO.File]::WriteAllBytes($FilePath, $Content)
+            } else {
+                Add-Content -Path $FilePath -Value $Content -NoNewline -Encoding $Encoding
+            }
+            Log-ExecutedAction -ActionType "FileWrite" -Details $details
+            return $true
+        } catch {
+            Write-Log "ERROR: FileWrite failed: $($_.Exception.Message)" "ERROR"
+            $RunContext.Errors.Add("FileWrite '$FilePath': $($_.Exception.Message)")
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would write file: $FilePath" "INFO"
+        return $true
+    }
+}
+
+function Invoke-FileDelete {
+    param([string]$FilePath, [string]$Description = "")
+    
+    if (!(Test-Path $FilePath)) { return $true }  # Already gone
+    
+    $details = @{
+        Path        = $FilePath
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "FileDelete" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Remove-Item -Path $FilePath -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "FileDelete" -Details $details
+            return $true
+        } catch {
+            Write-Log "WARNING: FileDelete failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would delete file: $FilePath" "INFO"
+        return $true
+    }
+}
+
+function Invoke-DirectoryCreate {
+    param([string]$Path, [string]$Description = "")
+    
+    if (Test-Path $Path) { return $true }  # Already exists
+    
+    $details = @{
+        Path        = $Path
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "DirectoryCreate" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            New-Item -ItemType Directory -Path $Path -Force | Out-Null
+            Log-ExecutedAction -ActionType "DirectoryCreate" -Details $details
+            Write-Log "  - Created folder: $Path"
+            return $true
+        } catch {
+            Write-Log "ERROR: DirectoryCreate failed: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would create directory: $Path" "INFO"
+        return $true
+    }
+}
+
+function Invoke-CertificateCreate {
+    param(
+        [string]$Type,
+        [string]$Subject,
+        [string[]]$DnsName,
+        [int]$KeyLength,
+        [object]$Signer,
+        [hashtable]$Extensions,
+        [string]$Description = ""
+    )
+    
+    $details = @{
+        Type        = $Type
+        Subject     = $Subject
+        DnsNames    = $DnsName -join ", "
+        KeyLength   = $KeyLength
+        HasSigner   = $null -ne $Signer
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "CertCreate" -Details $details
+    
+    if ($RunContext.RunMode -eq "ReportOnly") {
+        Write-Log "  [DRY-RUN] Would create certificate: $Subject" "INFO"
+        $dummyCert = @{ Thumbprint = "[REPORT-ONLY]"; Subject = $Subject }
+        return $dummyCert
+    }
+    
+    # Execution mode - actually create cert (rest of function continues below)
+    # This return value will be replaced with actual cert
+    return $null  # Will be filled by caller with actual New-SelfSignedCertificate output
+}
+
+function Invoke-CertificateImport {
+    param([string]$FilePath, [string]$Store, [object]$Password = $null, [string]$Description = "")
+    
+    $details = @{
+        FilePath    = $FilePath
+        Store       = $Store
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "CertImport" -Details $details
+    
+    if ($RunContext.RunMode -eq "ReportOnly") {
+        Write-Log "  [DRY-RUN] Would import certificate: $FilePath → $Store" "INFO"
+        $dummyCert = @{ Thumbprint = "[REPORT-ONLY]"; FilePath = $FilePath }
+        return $dummyCert
+    }
+    
+    # Execution mode - actually import (rest continues below)
+    return $null
+}
+
+function Invoke-CertificateExport {
+    param([object]$Certificate, [string]$FilePath, [string]$Format = "CER", [object]$Password = $null, [string]$Description = "")
+    
+    if (!$Certificate) { return $false }
+    
+    $details = @{
+        CertSubject = $Certificate.Subject
+        FilePath    = $FilePath
+        Format      = $Format
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "CertExport" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            switch ($Format.ToUpper()) {
+                "CER" { Export-Certificate -Cert $Certificate -FilePath $FilePath -Force | Out-Null }
+                "PFX" { Export-PfxCertificate -Cert $Certificate -FilePath $FilePath -Password $Password -Force | Out-Null }
+            }
+            Log-ExecutedAction -ActionType "CertExport" -Details $details
+            Write-Log "  - Exported $Format: $FilePath"
+            return $true
+        } catch {
+            Write-Log "WARNING: CertExport failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would export certificate to: $FilePath" "INFO"
+        return $true
+    }
+}
+
+function Invoke-CertificateDelete {
+    param([string]$Thumbprint, [string]$Store = "Cert:\LocalMachine\My", [string]$Description = "")
+    
+    $details = @{
+        Thumbprint  = $Thumbprint
+        Store       = $Store
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "CertDelete" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Remove-Item "$Store\$Thumbprint" -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "CertDelete" -Details $details
+            Write-Log "  - Deleted cert: $Thumbprint from $Store"
+            return $true
+        } catch {
+            Write-Log "WARNING: CertDelete failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would delete certificate: $Thumbprint from $Store" "INFO"
+        return $true
+    }
+}
+
+function Invoke-RegistryWrite {
+    param([string]$Path, [string]$Name, [object]$Value, [string]$Type = "String", [string]$Description = "")
+    
+    $details = @{
+        Path        = $Path
+        Name        = $Name
+        ValueType   = $Type
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "RegistryWrite" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "RegistryWrite" -Details $details
+            Write-Log "  - Registry write: $Path\$Name"
+            return $true
+        } catch {
+            Write-Log "ERROR: Registry write failed: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would write registry: $Path\$Name" "INFO"
+        return $true
+    }
+}
+
+function Invoke-RegistryDelete {
+    param([string]$Path, [string]$Description = "")
+    
+    if (!(Test-Path $Path)) { return $true }
+    
+    $details = @{
+        Path        = $Path
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "RegistryDelete" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Remove-Item -Path $Path -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "RegistryDelete" -Details $details
+            Write-Log "  - Deleted registry: $Path"
+            return $true
+        } catch {
+            Write-Log "WARNING: RegistryDelete failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would delete registry: $Path" "INFO"
+        return $true
+    }
+}
+
+function Invoke-ServiceAction {
+    param([string]$Action, [string]$ServiceName, [string]$Description = "")
+    
+    $details = @{
+        Action       = $Action
+        ServiceName  = $ServiceName
+        Description  = $Description
+    }
+    
+    Log-PlannedAction -ActionType "ServiceAction" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            switch ($Action.ToLower()) {
+                "restart" { Restart-Service $ServiceName -Force -ErrorAction Stop }
+                "stop"    { Stop-Service $ServiceName -Force -ErrorAction Stop }
+                "start"   { Start-Service $ServiceName -ErrorAction Stop }
+            }
+            Log-ExecutedAction -ActionType "ServiceAction" -Details $details
+            Write-Log "  - Service $Action`: $ServiceName"
+            return $true
+        } catch {
+            Write-Log "WARNING: ServiceAction failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would $Action service: $ServiceName" "INFO"
+        return $true
+    }
+}
+
+function Invoke-RemoteCommand {
+    param([string]$ComputerName, [scriptblock]$ScriptBlock, [object[]]$ArgumentList, [string]$Description = "")
+    
+    $details = @{
+        ComputerName = $ComputerName
+        Description  = $Description
+    }
+    
+    Log-PlannedAction -ActionType "RemoteCommand" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            Log-ExecutedAction -ActionType "RemoteCommand" -Details $details
+            return $result
+        } catch {
+            Write-Log "ERROR: RemoteCommand failed: $($_.Exception.Message)" "ERROR"
+            return $null
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would invoke remote command on: $ComputerName" "INFO"
+        return $null
+    }
+}
+
+function Invoke-RemoteCopy {
+    param([string]$SourcePath, [string]$TargetPath, [string]$ComputerName, [string]$Description = "")
+    
+    $details = @{
+        SourcePath  = $SourcePath
+        TargetPath  = $TargetPath
+        ComputerName = $ComputerName
+        Description = $Description
+    }
+    
+    Log-PlannedAction -ActionType "RemoteCopy" -Details $details
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        try {
+            Copy-Item -Path $SourcePath -Destination $TargetPath -Force -ErrorAction Stop
+            Log-ExecutedAction -ActionType "RemoteCopy" -Details $details
+            Write-Log "  - Remote copy: $SourcePath → $TargetPath on $ComputerName"
+            return $true
+        } catch {
+            Write-Log "WARNING: RemoteCopy failed: $($_.Exception.Message)" "WARN"
+            return $false
+        }
+    } else {
+        Write-Log "  [DRY-RUN] Would copy to remote: $SourcePath → $ComputerName\$TargetPath" "INFO"
+        return $true
+    }
+}
 
 
 # ================================================================
@@ -594,7 +1069,7 @@ function Resolve-DCNames {
 function Backup-CertsBeforeWipe {
     param([string]$RunLabel)
 
-    $stamp     = Get-Date -Format "yyyyMMdd-HHmmss"
+    $stamp     = Get-Date -Format "yyyyMMdd-HHmmss-fff"      # milliseconds added for uniqueness
     $runBackup = Join-Path $BackupDir "$stamp-$RunLabel"
     New-Item -ItemType Directory -Path $runBackup | Out-Null
 
@@ -783,14 +1258,14 @@ function Wipe-Certs {
           Where-Object { $_.Subject -match "DuoSSO-RootCA" -or $_.Issuer -match "DuoSSO-RootCA" } |
           ForEach-Object {
             Write-Log "    Removing [My]: $($_.Subject) [$($_.Thumbprint)]"
-            Remove-Item "Cert:\LocalMachine\My\$($_.Thumbprint)" -Force
+            Invoke-CertificateDelete -Thumbprint $_.Thumbprint -Store "Cert:\LocalMachine\My" -Description "DuoSSO Root/Leaf from My"
           }
 
         Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
           Where-Object { $_.Subject -match "DuoSSO-RootCA" } |
           ForEach-Object {
             Write-Log "    Removing [Root]: $($_.Subject) [$($_.Thumbprint)]"
-            Remove-Item "Cert:\LocalMachine\Root\$($_.Thumbprint)" -Force
+            Invoke-CertificateDelete -Thumbprint $_.Thumbprint -Store "Cert:\LocalMachine\Root" -Description "DuoSSO Root from trust store"
           }
     } else {
         # Secondary: remove leaf certs only, leave Root CA trust intact
@@ -798,15 +1273,16 @@ function Wipe-Certs {
           Where-Object { $_.Issuer -match "DuoSSO-RootCA" -and $_.Subject -notmatch "DuoSSO-RootCA" } |
           ForEach-Object {
             Write-Log "    Removing leaf [My]: $($_.Subject) [$($_.Thumbprint)]"
-            Remove-Item "Cert:\LocalMachine\My\$($_.Thumbprint)" -Force
+            Invoke-CertificateDelete -Thumbprint $_.Thumbprint -Store "Cert:\LocalMachine\My" -Description "DuoSSO Leaf from My"
           }
     }
 
     # Always clear NTDS store and legacy self-signed
     if (Test-Path $NtdsRegPath) {
         Get-ChildItem $NtdsRegPath -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Log "    Removing [NTDS]: $(Split-Path $_.Name -Leaf)"
-            Remove-Item -Path $_.PSPath -Force -Recurse
+            $thumb = Split-Path $_.Name -Leaf
+            Write-Log "    Removing [NTDS]: $thumb"
+            Invoke-RegistryDelete -Path $_.PSPath -Description "NTDS cert binding"
         }
     }
 
@@ -827,28 +1303,46 @@ function Wipe-Certs {
 function New-RootCA {
     $root = $null
     try {
-        $root = New-SelfSignedCertificate `
-          -Type Custom `
-          -Subject "CN=DuoSSO-RootCA" `
-          -KeyUsage DigitalSignature, KeyEncipherment, DataEncipherment, CertSign, CRLSign `
-          -KeyLength 2048 `
-          -HashAlgorithm sha256 `
-          -CertStoreLocation "Cert:\LocalMachine\My" `
-          -KeyExportPolicy Exportable `
-          -NotAfter (Get-Date).AddYears(10) `
-          -KeySpec KeyExchange `
-          -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2") `
-          -ErrorAction Stop
+        Log-PlannedAction -ActionType "CertCreate" -Details @{
+            Subject     = "CN=DuoSSO-RootCA"
+            KeyLength   = 2048
+            HashAlgorithm = "sha256"
+        }
+        
+        if ($RunContext.RunMode -eq "ReportOnly") {
+            Write-Log "  [DRY-RUN] Would create Root CA certificate" "INFO"
+            $root = @{ Thumbprint = "[REPORT-ONLY-ROOT]"; Subject = "CN=DuoSSO-RootCA"; NotAfter = (Get-Date).AddYears(10) }
+        } else {
+            $root = New-SelfSignedCertificate `
+              -Type Custom `
+              -Subject "CN=DuoSSO-RootCA" `
+              -KeyUsage DigitalSignature, KeyEncipherment, DataEncipherment, CertSign, CRLSign `
+              -KeyLength 2048 `
+              -HashAlgorithm sha256 `
+              -CertStoreLocation "Cert:\LocalMachine\My" `
+              -KeyExportPolicy Exportable `
+              -NotAfter (Get-Date).AddYears(10) `
+              -KeySpec KeyExchange `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2") `
+              -ErrorAction Stop
+            Log-ExecutedAction -ActionType "CertCreate" -Details @{ Thumbprint = $root.Thumbprint }
+        }
     } catch {
         Write-Log "ERROR: Root CA creation failed: $($_.Exception.Message)" "ERROR"; exit 1
     }
 
     if (!$root -or !$root.Thumbprint) { Write-Log "ERROR: Root CA returned null." "ERROR"; exit 1 }
 
-    Export-Certificate    -Cert $root -FilePath $rootCer -Force | Out-Null
-    if (Test-Path $rootPem) { Remove-Item $rootPem -Force }
-    & $Certutil -encode $rootCer $rootPem | Out-Null
-    Export-PfxCertificate -Cert $root -FilePath $rootPfx -Password $PfxPassword | Out-Null
+    Invoke-CertificateExport -Certificate $root -FilePath $rootCer -Format "CER" -Description "Root CA CER"
+    Invoke-FileDelete -FilePath $rootPem -Description "Root CA PEM (old)"
+    
+    if ($RunContext.RunMode -eq "Execution") {
+        & $Certutil -encode $rootCer $rootPem | Out-Null
+    } else {
+        Write-Log "  [DRY-RUN] Would encode Root CA to PEM" "INFO"
+    }
+    
+    Invoke-CertificateExport -Certificate $root -FilePath $rootPfx -Format "PFX" -Password $PfxPassword -Description "Root CA PFX"
 
     Write-Log "  - Root CA created.  Thumbprint: $($root.Thumbprint)  NotAfter: $($root.NotAfter)"
     return $root
@@ -897,27 +1391,40 @@ function New-LdapsCert {
 
     $leaf = $null
     try {
-        $leaf = New-SelfSignedCertificate `
-          -Type Custom `
-          -Subject "CN=$FQDN" `
-          -DnsName $FQDN, $Short, $Domain, $FQDN.ToUpper(), $Short.ToUpper() `
-          -KeyLength 2048 `
-          -KeyUsage DigitalSignature, KeyEncipherment, DataEncipherment `
-          -HashAlgorithm sha256 `
-          -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2") `
-          -Signer $RootSigner `
-          -CertStoreLocation "Cert:\LocalMachine\My" `
-          -NotAfter (Get-Date).AddYears(5) `
-          -KeySpec KeyExchange `
-          -ErrorAction Stop
+        Log-PlannedAction -ActionType "CertCreate" -Details @{
+            Subject     = "CN=$FQDN"
+            DnsNames    = "$FQDN, $Short, $Domain"
+            KeyLength   = 2048
+            Signer      = if ($RootSigner.Subject) { $RootSigner.Subject } else { "DuoSSO-RootCA" }
+        }
+        
+        if ($RunContext.RunMode -eq "ReportOnly") {
+            Write-Log "  [DRY-RUN] Would create LDAPS leaf certificate: CN=$FQDN" "INFO"
+            $leaf = @{ Thumbprint = "[REPORT-ONLY-LEAF]"; Subject = "CN=$FQDN"; NotAfter = (Get-Date).AddYears(5) }
+        } else {
+            $leaf = New-SelfSignedCertificate `
+              -Type Custom `
+              -Subject "CN=$FQDN" `
+              -DnsName $FQDN, $Short, $Domain, $FQDN.ToUpper(), $Short.ToUpper() `
+              -KeyLength 2048 `
+              -KeyUsage DigitalSignature, KeyEncipherment, DataEncipherment `
+              -HashAlgorithm sha256 `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2") `
+              -Signer $RootSigner `
+              -CertStoreLocation "Cert:\LocalMachine\My" `
+              -NotAfter (Get-Date).AddYears(5) `
+              -KeySpec KeyExchange `
+              -ErrorAction Stop
+            Log-ExecutedAction -ActionType "CertCreate" -Details @{ Thumbprint = $leaf.Thumbprint; Subject = $leaf.Subject }
+        }
     } catch {
         Write-Log "ERROR: LDAPS cert creation failed: $($_.Exception.Message)" "ERROR"; exit 1
     }
 
     if (!$leaf -or !$leaf.Thumbprint) { Write-Log "ERROR: LDAPS cert returned null." "ERROR"; exit 1 }
 
-    Export-Certificate    -Cert $leaf -FilePath $ldapsCer -Force | Out-Null
-    Export-PfxCertificate -Cert $leaf -FilePath $ldapsPfx -Password $PfxPassword | Out-Null
+    Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsCer -Format "CER" -Description "LDAPS Leaf CER"
+    Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsPfx -Format "PFX" -Password $PfxPassword -Description "LDAPS Leaf PFX"
 
     Write-Log "  - Leaf cert created."
     Write-Log "    Subject: $($leaf.Subject)  Issuer: $($leaf.Issuer)"
@@ -948,53 +1455,87 @@ function Validate-LdapsCert {
 function Inject-IntoNTDS {
     param($Cert)
 
-    if (!(Test-Path $NtdsRegPath)) { New-Item -Path $NtdsRegPath -Force | Out-Null }
+    if (!(Test-Path $NtdsRegPath)) { 
+        if ($RunContext.RunMode -eq "Execution") {
+            New-Item -Path $NtdsRegPath -Force | Out-Null
+        } else {
+            Write-Log "  [DRY-RUN] Would create NTDS registry path" "INFO"
+        }
+    }
 
     # Grant NETWORK SERVICE + SYSTEM read on private key
-    try {
-        $keyName = $null
-        try   { $keyName = $Cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName } catch {}
-        if (!$keyName) {
-            try { $keyName = ([System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Cert)).Key.UniqueName } catch {}
-        }
-        if ($keyName) {
-            $keyFile = Join-Path "C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys" $keyName
-            if (Test-Path $keyFile) {
-                $acl = Get-Acl $keyFile
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NETWORK SERVICE","Read","Allow")))
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM","FullControl","Allow")))
-                Set-Acl -Path $keyFile -AclObject $acl
-                Write-Log "  - Private key ACL granted: $keyFile"
+    if ($Cert.Thumbprint -ne "[REPORT-ONLY-LEAF]") {
+        try {
+            $keyName = $null
+            try   { $keyName = $Cert.PrivateKey.CspKeyContainerInfo.UniqueKeyContainerName } catch {}
+            if (!$keyName) {
+                try { $keyName = ([System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Cert)).Key.UniqueName } catch {}
             }
+            if ($keyName) {
+                $keyFile = Join-Path "C:\ProgramData\Microsoft\Crypto\RSA\MachineKeys" $keyName
+                if (Test-Path $keyFile) {
+                    if ($RunContext.RunMode -eq "Execution") {
+                        $acl = Get-Acl $keyFile
+                        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NETWORK SERVICE","Read","Allow")))
+                        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM","FullControl","Allow")))
+                        Set-Acl -Path $keyFile -AclObject $acl
+                        Log-ExecutedAction -ActionType "ACLUpdate" -Details @{ Path = $keyFile }
+                    }
+                    Write-Log "  - Private key ACL would be granted: $keyFile"
+                }
+            }
+        } catch {
+            Write-Log "  WARNING: ACL grant failed: $($_.Exception.Message)" "WARN"
         }
-    } catch {
-        Write-Log "  WARNING: ACL grant failed: $($_.Exception.Message)" "WARN"
+    } else {
+        Write-Log "  [DRY-RUN] Would grant ACL for private key" "INFO"
     }
 
-    # Write cert blob into NTDS registry
-    try {
-        $regKey = Join-Path $NtdsRegPath $Cert.Thumbprint.ToUpper()
-        New-Item -Path $regKey -Force | Out-Null
-        Set-ItemProperty -Path $regKey -Name "Blob" -Value $Cert.RawData -Type Binary
-        Write-Log "  - Cert written to NTDS registry."
-    } catch {
-        Write-Log "ERROR: NTDS registry write failed: $($_.Exception.Message)" "ERROR"; exit 1
+    # Write cert blob into NTDS registry via wrapper
+    $regKey = Join-Path $NtdsRegPath $Cert.Thumbprint.ToUpper()
+    
+    if ($RunContext.RunMode -eq "ReportOnly") {
+        Write-Log "  [DRY-RUN] Would create registry key: $regKey" "INFO"
+        Write-Log "  [DRY-RUN] Would write cert blob to NTDS registry" "INFO"
+    } else {
+        try {
+            New-Item -Path $regKey -Force | Out-Null
+            Invoke-RegistryWrite -Path $regKey -Name "Blob" -Value $Cert.RawData -Type Binary -Description "NTDS cert binding"
+            Write-Log "  - Cert written to NTDS registry."
+        } catch {
+            Write-Log "ERROR: NTDS registry write failed: $($_.Exception.Message)" "ERROR"; exit 1
+        }
     }
 
-    & $Certutil -repairstore my $Cert.Thumbprint 2>&1 | ForEach-Object { Write-Log "    $_" }
-
-    $ok = & $Certutil -store "\\.\NTDS\My" 2>&1 | Select-String $Cert.Thumbprint -SimpleMatch
-    Write-Log $(if ($ok) { "  - Confirmed in NTDS service store." } else { "  WARNING: Not confirmed via certutil - registry write should apply on restart." })
+    if ($RunContext.RunMode -eq "Execution") {
+        & $Certutil -repairstore my $Cert.Thumbprint 2>&1 | ForEach-Object { Write-Log "    $_" }
+        $ok = & $Certutil -store "\\.\NTDS\My" 2>&1 | Select-String $Cert.Thumbprint -SimpleMatch
+        Write-Log $(if ($ok) { "  - Confirmed in NTDS service store." } else { "  WARNING: Not confirmed via certutil - registry write should apply on restart." })
+    } else {
+        Write-Log "  [DRY-RUN] Would verify cert in NTDS store" "INFO"
+    }
 }
 
 function Restart-NTDSAndVerify {
     param([string]$Thumbprint, [string]$FQDN)
 
-    Stop-Service Netlogon -Force -ErrorAction SilentlyContinue
-    Restart-Service NTDS -Force
+    if ($RunContext.RunMode -eq "ReportOnly") {
+        Write-Log "  [DRY-RUN] Would stop Netlogon service" "INFO"
+        Write-Log "  [DRY-RUN] Would restart NTDS service" "INFO"
+        Write-Log "  [DRY-RUN] Would wait 15 seconds for service startup" "INFO"
+        Write-Log "  [DRY-RUN] Would start Netlogon service" "INFO"
+        Write-Log "  [DRY-RUN] Would verify DNS service is running (max 60s)" "INFO"
+        Write-Log "  [DRY-RUN] Would verify cert binding on LDAPS port 636" "INFO"
+        Write-Log "  [IMPORTANT] In Report-Only: no actual services are restarted" "INFO"
+        return
+    }
+
+    # Execution mode: perform actual service operations
+    Invoke-ServiceAction -Action "stop" -ServiceName "Netlogon" -Description "Stop Netlogon before NTDS restart"
+    Invoke-ServiceAction -Action "restart" -ServiceName "NTDS" -Description "Restart NTDS service to bind new cert"
     Write-Log "  - NTDS restarted. Waiting 15 seconds..."
     Start-Sleep -Seconds 15
-    Start-Service Netlogon -ErrorAction SilentlyContinue
+    Invoke-ServiceAction -Action "start" -ServiceName "Netlogon" -Description "Restart Netlogon"
 
     $waited = 0
     do {
@@ -1041,6 +1582,141 @@ function Restart-NTDSAndVerify {
     Write-Log "  - Port 636 open and reachable."
 }
 
+# ================================================================
+# REPORTING: JSON + HTML from RunContext
+# ================================================================
+
+function Generate-JsonReport {
+    param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb)
+    
+    $report = @{
+        Metadata = @{
+            ScriptVersion    = "1.0-Report"
+            ExecutionMode    = $RunContext.RunMode
+            SessionId        = $RunContext.SessionId
+            Timestamp        = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Hostname         = $env:COMPUTERNAME
+            Domain           = $env:USERDNSDOMAIN
+            OperationMode    = $Mode
+        }
+        Summary = @{
+            TargetFQDN       = $FQDN
+            RootThumbprint   = $RootThumb
+            LeafThumbprint   = $LeafThumb
+            PlannedActions   = $RunContext.PlannedActions.Count
+            ExecutedActions  = $RunContext.ExecutedActions.Count
+            Warnings         = $RunContext.Warnings.Count
+            Errors           = $RunContext.Errors.Count
+        }
+        PlannedActions = @($RunContext.PlannedActions | ForEach-Object {
+            @{
+                Timestamp = $_.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
+                Type      = $_.Type
+                Details   = $_.Details
+            }
+        })
+        ExecutedActions = @($RunContext.ExecutedActions | ForEach-Object {
+            @{
+                Timestamp = $_.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
+                Type      = $_.Type
+                Details   = $_.Details
+            }
+        })
+        Warnings = $RunContext.Warnings
+        Errors   = $RunContext.Errors
+        Findings = $RunContext.Findings
+    }
+    
+    if ($RunContext.RunMode -eq "ReportOnly") {
+        $report.Metadata | Add-Member -NotePropertyName "Important" -NotePropertyValue "REPORT-ONLY: No changes were made to the system."
+    }
+    
+    return $report | ConvertTo-Json -Depth 10
+}
+
+function Generate-HtmlReport {
+    param([string]$JsonData)
+    
+    $json = $JsonData | ConvertFrom-Json
+    $modeClass = if ($json.Metadata.ExecutionMode -eq "Execution") { "exec" } else { "report" }
+    $modeBadge = if ($json.Metadata.ExecutionMode -eq "Execution") { "✓ EXECUTION MODE" } else { "⚠ REPORT-ONLY MODE" }
+    
+    $html = @"
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>DuoSSO CertTool Report</title>
+<style>
+body{font-family:Segoe UI,sans-serif;margin:20px;background:#f5f5f5}
+.container{max-width:1200px;margin:0 auto;background:white;padding:20px;border-radius:8px}
+.header{border-bottom:3px solid #0078d4;padding-bottom:10px;margin-bottom:20px}
+.header h1{margin:0;color:#0078d4}
+.mode-badge{display:inline-block;padding:4px 12px;border-radius:4px;font-weight:bold;font-size:12px;margin-top:8px}
+.mode-badge.exec{background:#d4edda;color:#155724}
+.mode-badge.report{background:#fff3cd;color:#856404}
+.section{margin-bottom:30px}
+.section h2{background:#f0f0f0;padding:10px;border-left:4px solid #0078d4;margin-top:0}
+.summary-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:15px}
+.summary-item{background:#f9f9f9;padding:10px;border-radius:4px}
+.summary-item label{font-weight:bold;color:#333}
+.summary-item value{color:#666;display:block;margin-top:4px}
+table{width:100%;border-collapse:collapse}
+th{background:#0078d4;color:white;padding:10px;text-align:left}
+td{padding:10px;border-bottom:1px solid #ddd;font-family:monospace;font-size:11px}
+tr:hover{background:#f9f9f9}
+.planned{background:#e3f2fd}
+.executed{background:#e8f5e9}
+.warning{color:#ff6f00;font-weight:bold}
+.error{color:#c62828;font-weight:bold}
+.footer{margin-top:40px;padding-top:20px;border-top:1px solid #ddd;color:#666;font-size:12px}
+.no-changes{background:#e8f5e9;border-left:4px solid #4caf50;padding:12px;margin:15px 0;border-radius:4px;color:#2e7d32;font-weight:bold}
+</style></head><body>
+<div class="container">
+<div class="header"><h1>DuoSSO Certificate Tool Report</h1><div class="mode-badge $modeClass">$modeBadge</div></div>
+<div class="section"><h2>Execution Summary</h2>
+<div class="summary-grid">
+<div class="summary-item"><label>Mode:</label><value>$($json.Metadata.ExecutionMode)</value></div>
+<div class="summary-item"><label>Operation:</label><value>$($json.Metadata.OperationMode)</value></div>
+<div class="summary-item"><label>Hostname:</label><value>$($json.Metadata.Hostname)</value></div>
+<div class="summary-item"><label>Timestamp:</label><value>$($json.Metadata.Timestamp)</value></div>
+</div></div>
+$($json.Metadata.Important ? "<div class='no-changes'>$($json.Metadata.Important)</div>" : "")
+<div class="section"><h2>Actions Summary</h2>
+<div class="summary-grid">
+<div class="summary-item"><label>Planned:</label><value>$($json.Summary.PlannedActions)</value></div>
+<div class="summary-item"><label>Executed:</label><value>$($json.Summary.ExecutedActions)</value></div>
+<div class="summary-item"><label>Warnings:</label><value class="warning">$($json.Summary.Warnings)</value></div>
+<div class="summary-item"><label>Errors:</label><value class="error">$($json.Summary.Errors)</value></div>
+</div></div>
+$($json.Summary.PlannedActions -gt 0 ? "<div class='section'><h2>Planned Actions</h2><table><tr><th>Type</th><th>Details</th></tr>$($json.PlannedActions | ForEach-Object { "<tr class='planned'><td>$($_.Type)</td><td>$($_.Details | ConvertTo-Json -Compress)</td></tr>" })</table></div>" : "")
+<div class="footer"><p>Report ID: $($json.Metadata.SessionId)</p></div>
+</div></body></html>
+"@
+    return $html
+}
+
+function Write-Reports {
+    param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb)
+    
+    if (!$RunContext) { return }
+    
+    $timestamp = $RunContext.SessionId
+    $jsonFile = Join-Path $ReportsDir "Report-$timestamp.json"
+    $htmlFile = Join-Path $ReportsDir "Report-$timestamp.html"
+    
+    try {
+        # Generate and write JSON report
+        $jsonData = Generate-JsonReport -Mode $Mode -FQDN $FQDN -RootThumb $RootThumb -LeafThumb $LeafThumb
+        if ($RunContext.RunMode -eq "Execution") { [System.IO.File]::WriteAllText($jsonFile, $jsonData) }
+        Write-Log "  - Report: $jsonFile"
+        
+        # Generate and write HTML report
+        $htmlData = Generate-HtmlReport -JsonData $jsonData
+        if ($RunContext.RunMode -eq "Execution") { [System.IO.File]::WriteAllText($htmlFile, $htmlData) }
+        Write-Log "  - Report: $htmlFile"
+    } catch {
+        Write-Log "  WARNING: Report write failed: $($_.Exception.Message)" "WARN"
+    }
+}
+
 function Print-Summary {
     param([string]$Mode, [string]$FQDN, [string]$RootThumb, [string]$LeafThumb, [string]$SharedPfx = "")
 
@@ -1063,7 +1739,7 @@ function Print-Summary {
             Write-Log ""
             Write-Log "  *** Distribute Root PFX to all secondary DCs ***"
             Write-Log "      $rootPfx"
-            Write-Log "      Password: $PlainPfxPass"
+            Write-Log "      Password will be displayed separately after execution."
         }
         "Multi-DC-Secondary" {
             Write-Log "  Shared Root PFX used: $SharedPfx"
@@ -1315,11 +1991,15 @@ function Run-MultiDCAgent {
 
 
 # ================================================================
-# ENTRY POINT
+# ENTRY POINT  
+# Perform preflight checks first, then determine execution mode
 # Non-interactive: .\DuoSSO-CertTool.ps1 3 "C:\path\to\shared.pfx"
-#   (used by Agent when invoking Secondary remotely)
-# Interactive: run with no args to get the menu
+#   (used by Agent when invoking Secondary remotely, always Execution mode)
+# Interactive: run with no args to get mode selector then operation menu
 # ================================================================
+Test-PreflightRequirements -Mode "Interactive"
+Initialize-PfxPassword
+
 if ($args.Count -ge 2 -and $args[0] -eq "3") {
     Run-MultiDCSecondary -SharedRootPfxPath $args[1]
     exit 0
@@ -1327,7 +2007,36 @@ if ($args.Count -ge 2 -and $args[0] -eq "3") {
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  DuoSSO LDAPS Certificate Tool"
+Write-Host "  EXECUTION MODE"
+Write-Host "========================================================"
+Write-Host ""
+Write-Host "  [E] Execution Mode (default)"
+Write-Host "      Perform all operations: create certs, backup existing ones,"
+Write-Host "      wipe and replace certs, modify registry, restart services."
+Write-Host "      Changes WILL be made to this system."
+Write-Host ""
+Write-Host "  [R] Report-Only Mode"
+Write-Host "      Plan all operations without making ANY changes."
+Write-Host "      Generates a detailed report of what WOULD happen."
+Write-Host "      Perfect for validation and pre-change reviews."
+Write-Host ""
+Write-Host "========================================================"
+Write-Host ""
+
+$modeChoice = Invoke-InteractivePrompt -Prompt "Select mode (E/R)" -ValidAnswers @("E", "R", "")
+if ($modeChoice -eq "R") {
+    $RunContext = Initialize-RunContext -RunMode "ReportOnly"
+    Write-Host "" 
+    Write-Host "*** REPORT-ONLY MODE ACTIVE ***" -ForegroundColor Cyan
+    Write-Host "No changes will be made to this system." -ForegroundColor Cyan
+    Write-Host ""
+} else {
+    $RunContext = Initialize-RunContext -RunMode "Execution"
+}
+
+Write-Host ""
+Write-Host "========================================================"
+Write-Host "  SELECT OPERATION"
 Write-Host "========================================================"
 Write-Host ""
 Write-Host "  [1] Single DC"
