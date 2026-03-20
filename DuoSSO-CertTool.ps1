@@ -1137,6 +1137,28 @@ function Resolve-DCNames {
     return @{ FQDN = $fqdn.ToLower(); Short = $short; Domain = $domain.ToLower() }
 }
 
+function Get-CertificateBackupFileName {
+    param(
+        $Certificate,
+        [string]$Prefix
+    )
+
+    $subjectName = $Certificate.Subject
+    if ($subjectName -match 'CN=([^,]+)') {
+        $subjectName = $matches[1]
+    }
+
+    $safeName = $subjectName -replace '[\\/:*?"<>|]', '_'
+    $safeName = $safeName -replace '\s+', '_'
+    $safeName = $safeName.Trim('_')
+
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        $safeName = $Certificate.Thumbprint
+    }
+
+    return "{0}_{1}_{2}.cer" -f $Prefix, $safeName, $Certificate.Thumbprint
+}
+
 # ----------------------------------------------------------------
 # BACKUP: exports every cert we are about to delete into a
 # timestamped subfolder under .\Backup and writes per-cert
@@ -1174,7 +1196,7 @@ function Backup-CertsBeforeWipe {
     Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
       Where-Object { $_.Subject -match "DuoSSO-RootCA" -or $_.Issuer -match "DuoSSO-RootCA" } |
       ForEach-Object {
-        $file = Join-Path $runBackup ("My_" + $_.Thumbprint + ".cer")
+                $file = Join-Path $runBackup (Get-CertificateBackupFileName -Certificate $_ -Prefix "My")
         Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup [My] certificate"
         Write-Log "    Backed up [My]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [My] $($_.Subject)  [$($_.Thumbprint)]"
@@ -1187,7 +1209,7 @@ function Backup-CertsBeforeWipe {
     Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
       Where-Object { $_.Subject -match "DuoSSO-RootCA" } |
       ForEach-Object {
-        $file = Join-Path $runBackup ("Root_" + $_.Thumbprint + ".cer")
+                $file = Join-Path $runBackup (Get-CertificateBackupFileName -Certificate $_ -Prefix "Root")
         Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup [Root] certificate"
         Write-Log "    Backed up [Root]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [Root] $($_.Subject)  [$($_.Thumbprint)]"
@@ -1207,7 +1229,7 @@ function Backup-CertsBeforeWipe {
         $_.Subject -eq $_.Issuer
       } |
       ForEach-Object {
-        $file = Join-Path $runBackup ("LegacySelfSigned_" + $_.Thumbprint + ".cer")
+                $file = Join-Path $runBackup (Get-CertificateBackupFileName -Certificate $_ -Prefix "LegacySelfSigned")
         Invoke-CertificateExport -Certificate $_ -FilePath $file -Format "CER" -Description "Backup legacy self-signed certificate"
         Write-Log "    Backed up [Legacy Self-Signed]: $($_.Subject) [$($_.Thumbprint)]"
         Write-Restore "  # [Legacy Self-Signed] $($_.Subject)  [$($_.Thumbprint)]"
@@ -1527,6 +1549,16 @@ function New-LdapsCert {
 
 function Validate-LdapsCert {
     param($Cert)
+
+    if ($RunContext -and $RunContext.RunMode -eq "ReportOnly") {
+        Write-Log "  [DRY-RUN] Would validate LDAPS certificate SAN, EKU, KeySpec, and store presence" "INFO"
+        return
+    }
+
+    if ($Cert.Thumbprint -eq "[REPORT-ONLY-LEAF]") {
+        Write-Log "  [DRY-RUN] Validation skipped for report-only placeholder certificate" "INFO"
+        return
+    }
 
     $san = ($Cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" })
     if (!$san) { Write-Log "ERROR: No SAN extension." "ERROR"; exit 1 }
