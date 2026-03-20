@@ -46,7 +46,8 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - Interactive prompts are labeled with `[REPORT-ONLY]`.
 - State-changing operations are logged as planned actions and skipped.
 - Reports are still written so the run can be reviewed and shared.
-- Intended artifacts in `Report-Only` are limited to the JSON and HTML reports.
+- The main log file is also written in `Report-Only` mode.
+- Output paths are based on the current working directory where the script is launched.
 
 ## Generated Artifacts
 
@@ -63,7 +64,7 @@ The script writes or plans the following under its working directory:
   - `Report-<session>.json`
   - `Report-<session>.html`
 - `DuoSSO-CertTool.log`
-  - written in `Execution` mode only
+  - written in both `Execution` and `Report-Only` modes
 
 ## Requirements
 

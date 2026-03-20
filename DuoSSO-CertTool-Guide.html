@@ -109,13 +109,14 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <ul>
 <li>Prompts are still interactive and prefixed with <code>[REPORT-ONLY]</code>.</li>
 <li>Certificate creation, import, export, deletion, registry writes, service changes, and remote operations are logged as planned actions only.</li>
-<li>Execution-specific logs and restore instruction files are not written in Report-Only mode.</li>
+<li>The main execution log is still written so the dry run has a durable console transcript.</li>
 <li>JSON and HTML reports are still written so the dry run can be reviewed.</li>
+<li>Artifacts are written under the current working directory where the script is launched.</li>
 </ul>
 
 <div class="note">
 <strong>Expected Report-Only artifacts</strong><br>
-The intended filesystem output in Report-Only mode is the generated report set in <code>Reports\</code>.
+The intended filesystem output in Report-Only mode is the generated report set in <code>Reports\</code> plus the main <code>DuoSSO-CertTool.log</code> file in the working directory.
 </div>
 
 <h2>5. Existing Chain Path</h2>
@@ -146,7 +147,7 @@ The intended filesystem output in Report-Only mode is the generated report set i
 <li><code>Backup\RESTORE-INSTRUCTIONS.log</code>: execution-mode restore script guidance.</li>
 <li><code>Reports\Report-&lt;session&gt;.json</code>: structured run ledger.</li>
 <li><code>Reports\Report-&lt;session&gt;.html</code>: human-readable run summary.</li>
-<li><code>DuoSSO-CertTool.log</code>: execution-mode console log.</li>
+<li><code>DuoSSO-CertTool.log</code>: console log written in both execution modes.</li>
 </ul>
 
 <h2>8. Report Contents</h2>

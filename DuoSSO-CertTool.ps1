@@ -51,8 +51,9 @@ function Test-PreflightRequirements {
 # LOGGING + PATHS
 # ----------------------------------------------------------------
 $ScriptDir  = Split-Path -Path $PSCommandPath -Parent
-$BackupDir  = Join-Path $ScriptDir "Backup"
-$LogFile    = Join-Path $ScriptDir "DuoSSO-CertTool.log"
+$WorkingDir = (Get-Location).Path
+$BackupDir  = Join-Path $WorkingDir "Backup"
+$LogFile    = Join-Path $WorkingDir "DuoSSO-CertTool.log"
 $RestoreLog = Join-Path $BackupDir "RESTORE-INSTRUCTIONS.log"
 
 # Log file deletion happens conditionally after mode selection (see below)
@@ -61,10 +62,7 @@ function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
     Write-Host $Message
-
-    if (!$RunContext -or $RunContext.RunMode -eq "Execution") {
-        Add-Content -Path $LogFile -Value $line
-    }
+    Add-Content -Path $LogFile -Value $line
 }
 
 function Write-Restore {
@@ -82,8 +80,8 @@ function Write-Restore {
 # ----------------------------------------------------------------
 # GLOBAL VARIABLES
 # ----------------------------------------------------------------
-$CertFolder   = Join-Path $ScriptDir "Certificates"
-$ReportsDir   = Join-Path $ScriptDir "Reports"
+$CertFolder   = Join-Path $WorkingDir "Certificates"
+$ReportsDir   = Join-Path $WorkingDir "Reports"
 
 # PFX password: generated at runtime, NEVER logged or displayed unless explicitly needed for operator handoff
 # For cross-DC scenarios, password is shown ONLY in final summary section and user must acknowledge
