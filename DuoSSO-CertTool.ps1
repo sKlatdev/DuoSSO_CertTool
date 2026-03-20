@@ -86,17 +86,29 @@ if (!(Test-Path $BackupDir)) { New-Item -Path $BackupDir -ItemType Directory -Fo
 
 # PFX password: generated at runtime, NEVER logged or displayed unless explicitly needed for operator handoff
 # For cross-DC scenarios, password is shown ONLY in final summary section and user must acknowledge
-$PlainPfxPass = $null
-$PfxPassword  = $null
+$script:PlainPfxPass = $null
+$script:PfxPassword  = $null
 
 function Initialize-PfxPassword {
-    if ($PlainPfxPass) { return }  # Already initialized
+    if ($script:PlainPfxPass) { return }  # Already initialized
     
     # Generate secure random password: 16 characters, mix of upper/lower/digits/symbols
     $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+"
     $random = New-Object System.Random
-    $PlainPfxPass = -join (1..16 | ForEach-Object { $chars[$random.Next($chars.Length)] })
-    $PfxPassword = $PlainPfxPass | ConvertTo-SecureString -AsPlainText -Force
+    $script:PlainPfxPass = -join (1..16 | ForEach-Object { $chars[$random.Next($chars.Length)] })
+    $script:PfxPassword = $script:PlainPfxPass | ConvertTo-SecureString -AsPlainText -Force
+}
+
+function Set-PfxPassword {
+    param([string]$PlainTextPassword)
+
+    if ([string]::IsNullOrWhiteSpace($PlainTextPassword)) {
+        Write-Log "ERROR: Shared Root PFX password was not provided." "ERROR"
+        exit 1
+    }
+
+    $script:PlainPfxPass = $PlainTextPassword
+    $script:PfxPassword = $PlainTextPassword | ConvertTo-SecureString -AsPlainText -Force
 }
 
 $Certutil     = "C:\Windows\System32\certutil.exe"
@@ -385,6 +397,11 @@ function Invoke-CertificateExport {
     }
     
     Log-PlannedAction -ActionType "CertExport" -Details $details
+
+    if ($Format.ToUpper() -eq "PFX" -and !$Password) {
+        Initialize-PfxPassword
+        $Password = $script:PfxPassword
+    }
     
     if ($RunContext.RunMode -eq "Execution") {
         try {
@@ -1516,8 +1533,10 @@ function New-RootCA {
         Write-Log "  [DRY-RUN] Would encode Root CA to PEM" "INFO"
     }
     
-    Invoke-CertificateExport -Certificate $root -FilePath $rootPfx -Format "PFX" -Password $PfxPassword -Description "Root CA PFX"
+    Invoke-CertificateExport -Certificate $root -FilePath $rootPfx -Format "PFX" -Password $script:PfxPassword -Description "Root CA PFX"
+    if ($RunContext.RunMode -eq "Execution" -and !(Test-Path $rootPfx)) { Write-Log "ERROR: Root CA PFX was not created: $rootPfx" "ERROR"; exit 1 }
     Invoke-FileCopy -SourcePath $rootPfx -DestinationPath $sharedRootPfx -Description "Shared Root PFX for secondary DCs"
+    if ($RunContext.RunMode -eq "Execution" -and !(Test-Path $sharedRootPfx)) { Write-Log "ERROR: Shared Root PFX was not created: $sharedRootPfx" "ERROR"; exit 1 }
 
     Write-Log "  - Root CA created.  Thumbprint: $($root.Thumbprint)  NotAfter: $($root.NotAfter)"
     return $root
@@ -1531,7 +1550,7 @@ function Import-SharedRootCA {
     }
 
     try {
-        $imported = Invoke-CertificateImport -FilePath $SharedRootPfxPath -Store "Cert:\LocalMachine\My" -Password $PfxPassword -Description "Import shared Root PFX into My"
+        $imported = Invoke-CertificateImport -FilePath $SharedRootPfxPath -Store "Cert:\LocalMachine\My" -Password $script:PfxPassword -Description "Import shared Root PFX into My"
         if ($RunContext.RunMode -eq "ReportOnly" -and $imported.Thumbprint -eq "REPORTONLY-IMPORTED") {
             Write-Log "  [DRY-RUN] Shared Root CA import simulated." "INFO"
             return @{ Thumbprint = "REPORTONLY-ROOT"; Subject = "CN=DuoSSO-RootCA" }
@@ -1610,7 +1629,8 @@ function New-LdapsCert {
     if (!$leaf -or !$leaf.Thumbprint) { Write-Log "ERROR: LDAPS cert returned null." "ERROR"; exit 1 }
 
     Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsCer -Format "CER" -Description "LDAPS Leaf CER"
-    Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsPfx -Format "PFX" -Password $PfxPassword -Description "LDAPS Leaf PFX"
+    Invoke-CertificateExport -Certificate $leaf -FilePath $ldapsPfx -Format "PFX" -Password $script:PfxPassword -Description "LDAPS Leaf PFX"
+    if ($RunContext.RunMode -eq "Execution" -and !(Test-Path $ldapsPfx)) { Write-Log "ERROR: LDAPS leaf PFX was not created: $ldapsPfx" "ERROR"; exit 1 }
 
     Write-Log "  - Leaf cert created."
     Write-Log "    Subject: $($leaf.Subject)  Issuer: $($leaf.Issuer)"
@@ -1697,7 +1717,7 @@ function Inject-IntoNTDS {
     if ($RunContext.RunMode -eq "Execution") {
         & $Certutil -repairstore my $Cert.Thumbprint 2>&1 | ForEach-Object { Write-Log "    $_" }
         $ok = & $Certutil -store "\\.\NTDS\My" 2>&1 | Select-String $Cert.Thumbprint -SimpleMatch
-        Write-Log $(if ($ok) { "  - Confirmed in NTDS service store." } else { "  WARNING: Not confirmed via certutil - registry write should apply on restart." })
+        Write-Log $(if ($ok) { "  - Confirmed in NTDS service store." } else { "  - NTDS service store did not confirm immediately; restart verification will confirm the binding." })
     } else {
         Write-Log "  [DRY-RUN] Would verify cert in NTDS store" "INFO"
     }
@@ -1934,7 +1954,7 @@ function Print-Summary {
             Write-Log ""
             Write-Log "  *** Distribute Root PFX to all secondary DCs ***"
             Write-Log "      $sharedRootPfx"
-            Write-Log "      Password will be displayed separately after execution."
+            Write-Log "      Password: $script:PlainPfxPass"
             Write-Log ""
             Write-Log "  Secondary mode path to use:"
             Write-Log "      $sharedRootPfx"
@@ -1974,6 +1994,7 @@ function Print-PackageSummary {
         Write-Log ""
         Write-Log "  Shared Root PFX:"
         Write-Log "      $sharedRootPfx"
+        Write-Log "      Password: $script:PlainPfxPass"
         Write-Log ""
         Write-Log "  Secondary mode path to use:"
         Write-Log "      $sharedRootPfx"
@@ -2016,9 +2037,9 @@ function Deploy-ToDC {
         Write-Log "  [Agent]   Copied script and Root PFX to $TargetDC."
 
         $remoteOutput = Invoke-RemoteCommand -ComputerName $TargetDC -Description "Invoke secondary mode on target DC" -ScriptBlock {
-            param($script, $pfx)
-            & powershell.exe -NonInteractive -ExecutionPolicy Bypass -File $script 3 $pfx
-        } -ArgumentList "C:\Admin\DuoSSO-CertTool.ps1", "C:\Admin\Certificates\DuoSSO-RootCert-Shared.pfx"
+            param($script, $pfx, $pfxPassword)
+            & powershell.exe -NonInteractive -ExecutionPolicy Bypass -File $script 3 $pfx $pfxPassword
+        } -ArgumentList "C:\Admin\DuoSSO-CertTool.ps1", "C:\Admin\Certificates\DuoSSO-RootCert-Shared.pfx", $script:PlainPfxPass
 
         if ($remoteOutput) {
             $remoteOutput | ForEach-Object { Write-Log "  [Agent]   [$TargetDC] $_" }
@@ -2187,10 +2208,11 @@ function Run-MultiDCPrimary {
 }
 
 function Run-MultiDCSecondary {
-    param([string]$SharedRootPfxPath)
+    param([string]$SharedRootPfxPath, [string]$SharedRootPfxPassword = "")
 
     Write-Log "=== MODE: Multi-DC Secondary  [$(Get-Date)] ==="
     Write-Log "    Shared Root PFX: $SharedRootPfxPath"
+    if ($SharedRootPfxPassword) { Set-PfxPassword -PlainTextPassword $SharedRootPfxPassword }
     Ensure-Folders
     $dc = Resolve-DCNames
     Write-Log "  FQDN: $($dc.FQDN)  Short: $($dc.Short)  Domain: $($dc.Domain)"
@@ -2317,7 +2339,7 @@ function Run-MultiDCAgent {
     if ($failed.Count -gt 0) {
         Write-Log ""
         Write-Log "  For failed DCs, distribute the Root PFX manually and run mode [3]:"
-        Write-Log "    Root PFX: $sharedRootPfx  (password: $PlainPfxPass)"
+        Write-Log "    Root PFX: $sharedRootPfx  (password: $script:PlainPfxPass)"
         $failed | ForEach-Object { Write-Log "    - $($_.DC)" }
     }
 
@@ -2340,7 +2362,8 @@ if ($args.Count -ge 2 -and $args[0] -eq "3") {
     $RunContext = Initialize-RunContext -RunMode "Execution"
     $RunContext.Interactive = $false
     Invoke-FileDelete -FilePath $LogFile -Description "Clear old logfile"
-    Run-MultiDCSecondary -SharedRootPfxPath $args[1]
+    $sharedPfxPassword = if ($args.Count -ge 3) { $args[2] } else { "" }
+    Run-MultiDCSecondary -SharedRootPfxPath $args[1] -SharedRootPfxPassword $sharedPfxPassword
     exit 0
 }
 
@@ -2408,7 +2431,8 @@ switch (Read-Host "Enter selection (1-4)") {
         Write-Host ""
         $pfx = Read-Host "  Shared Root CA PFX path"
         if (!$pfx) { Write-Log "ERROR: No PFX path provided." "ERROR"; exit 1 }
-        Run-MultiDCSecondary -SharedRootPfxPath $pfx
+        $pfxPassword = Read-Host "  Shared Root CA PFX password"
+        Run-MultiDCSecondary -SharedRootPfxPath $pfx -SharedRootPfxPassword $pfxPassword
     }
     "4" { Run-MultiDCAgent }
     default { Write-Log "ERROR: Invalid selection." "ERROR"; exit 1 }
