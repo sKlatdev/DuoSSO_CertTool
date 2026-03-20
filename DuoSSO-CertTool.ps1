@@ -55,7 +55,7 @@ $BackupDir  = Join-Path $ScriptDir "Backup"
 $LogFile    = Join-Path $ScriptDir "DuoSSO-CertTool.log"
 $RestoreLog = Join-Path $BackupDir "RESTORE-INSTRUCTIONS.log"
 
-if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
+# Log file deletion happens conditionally after mode selection (see below)
 
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -2095,6 +2095,7 @@ Initialize-PfxPassword
 if ($args.Count -ge 2 -and $args[0] -eq "3") {
     $RunContext = Initialize-RunContext -RunMode "Execution"
     $RunContext.Interactive = $false
+    Invoke-FileDelete -FilePath $LogFile -Description "Clear old logfile"
     Run-MultiDCSecondary -SharedRootPfxPath $args[1]
     exit 0
 }
@@ -2126,6 +2127,7 @@ if ($modeChoice -eq "R") {
     Write-Host ""
 } else {
     $RunContext = Initialize-RunContext -RunMode "Execution"
+    Invoke-FileDelete -FilePath $LogFile -Description "Clear old logfile"
 }
 
 Write-Host ""
