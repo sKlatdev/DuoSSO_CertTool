@@ -88,12 +88,14 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <li>Creates the shared root CA.</li>
 <li>Issues the local DC leaf certificate.</li>
 <li>Exports the shared root PFX for secondary domain controllers at <code>Certificates\DuoSSO-RootCert-Shared.pfx</code>.</li>
+<li>Displays the shared root PFX password in the completion summary.</li>
 <li>Upload the PEM to Duo once for the environment.</li>
 </ul>
 
 <h3>Multi-DC Secondary</h3>
 <ul>
 <li>Imports the shared root PFX.</li>
+<li>Requires the shared root PFX password from the primary run.</li>
 <li>Issues only the local DC leaf certificate.</li>
 <li>Does not require a second PEM upload to Duo.</li>
 </ul>
@@ -103,6 +105,7 @@ Report-Only mode follows the same interactive decision tree as Execution mode, l
 <li>Runs the primary flow on the current DC.</li>
 <li>Discovers other domain controllers.</li>
 <li>Copies the tool and shared PFX remotely and invokes Secondary mode over WinRM.</li>
+<li>Passes the shared root PFX password automatically to remote Secondary runs.</li>
 </ul>
 
 <h2>4. Report-Only Mode</h2>
@@ -165,7 +168,7 @@ The intended filesystem output in Report-Only mode is the generated report files
 
 <p>Agent mode uses a non-interactive Secondary invocation on remote DCs:</p>
 
-<pre><code>.\DuoSSO-CertTool.ps1 3 "C:\Path\To\DuoSSO-RootCert-Shared.pfx"</code></pre>
+<pre><code>.\DuoSSO-CertTool.ps1 3 "C:\Path\To\DuoSSO-RootCert-Shared.pfx" "&lt;SharedRootPfxPassword&gt;"</code></pre>
 
 <h2>10. Recommended Validation Sequence</h2>
 <ol>

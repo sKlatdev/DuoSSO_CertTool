@@ -31,14 +31,17 @@ PowerShell utility to discover, validate, issue, deploy, and report on LDAPS cer
 - `Multi-DC Primary`
   - Creates a shared root CA and issues a local leaf cert.
   - Export the shared root PFX for secondary DCs at `Certificates\DuoSSO-RootCert-Shared.pfx`.
+  - The run summary displays the shared root PFX password to use on secondary DCs.
   - Upload the generated root PEM to Duo once.
 - `Multi-DC Secondary`
   - Imports the shared root PFX.
+  - Requires the shared root PFX password from the primary run.
   - Issues a local leaf cert for the current DC.
   - Does not require re-uploading the PEM to Duo.
 - `Multi-DC Agent`
   - Runs the primary flow locally.
   - Discovers other DCs and attempts remote deployment over WinRM.
+  - Passes the shared root PFX password automatically to remote secondary runs.
 
 ## Report-Only Behavior
 
@@ -108,7 +111,7 @@ Open PowerShell as Administrator and execute:
 Non-interactive secondary mode is used by Agent deployments:
 
 ```powershell
-.\DuoSSO-CertTool.ps1 3 "C:\Path\To\DuoSSO-RootCert-Shared.pfx"
+.\DuoSSO-CertTool.ps1 3 "C:\Path\To\DuoSSO-RootCert-Shared.pfx" "<SharedRootPfxPassword>"
 ```
 
 ## Execution Flow Summary
